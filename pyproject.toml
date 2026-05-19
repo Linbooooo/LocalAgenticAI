@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agentic-ai"
+version = "0.1.0"
+description = "A local-only agentic coding assistant backed by Ollama."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Local Agentic AI" }]
+dependencies = []
+
+[project.scripts]
+local-agent = "local_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["local_agent*"]
+
