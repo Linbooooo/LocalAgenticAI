@@ -41,7 +41,26 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["matches"][0]["path"], "src/app.py")
 
+    def test_file_mutation_hidden_without_edit_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = make_registry(Path(directory))
+            registry.set_current_task("hello there")
+            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
+            self.assertNotIn("replace_in_file", tool_names)
+            result = registry.run(
+                "replace_in_file",
+                {"path": "README.md", "old": "Local Agentic AI", "new": "Local Intelligent Agent"},
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn("did not explicitly ask", result["error"])
+
+    def test_file_mutation_visible_with_edit_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = make_registry(Path(directory))
+            registry.set_current_task("update the readme")
+            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
+            self.assertIn("replace_in_file", tool_names)
+
 
 if __name__ == "__main__":
     unittest.main()
-

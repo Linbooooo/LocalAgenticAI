@@ -27,6 +27,7 @@ class LocalAgent:
         ]
 
     def run(self, task: str) -> AgentResult:
+        self.tools.set_current_task(task)
         self.messages.append({"role": "user", "content": task})
         final_content = ""
 

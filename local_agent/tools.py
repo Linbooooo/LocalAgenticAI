@@ -40,6 +40,7 @@ class Tool:
 class ToolRegistry:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+        self.current_task: str | None = None
         self._tools = {
             tool.name: tool
             for tool in [
@@ -134,12 +135,18 @@ class ToolRegistry:
         }
 
     def schemas(self) -> list[dict[str, Any]]:
-        return [tool.schema() for tool in self._tools.values()]
+        return [tool.schema() for tool in self._tools.values() if self._tool_visible(tool)]
+
+    def set_current_task(self, task: str) -> None:
+        self.current_task = task
 
     def run(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
         if tool is None:
             return {"ok": False, "error": f"Unknown tool: {name}"}
+        allowed, reason = self._tool_allowed(tool, arguments)
+        if not allowed:
+            return {"ok": False, "error": reason}
         if tool.mutates and not self._confirm(name, arguments):
             return {"ok": False, "error": "User declined tool execution."}
         try:
@@ -155,6 +162,26 @@ class ToolRegistry:
             preview = preview[:397] + "..."
         answer = input(f"Allow {name} {preview}? [y/N] ").strip().lower()
         return answer in {"y", "yes"}
+
+    def _tool_visible(self, tool: Tool) -> bool:
+        if self.current_task is None:
+            return True
+        if tool.name in {"write_file", "replace_in_file"}:
+            return _task_has_edit_intent(self.current_task)
+        if tool.name == "run_shell":
+            return _task_has_shell_intent(self.current_task)
+        return True
+
+    def _tool_allowed(self, tool: Tool, arguments: dict[str, Any]) -> tuple[bool, str]:
+        if self.current_task is None:
+            return True, ""
+        if tool.name in {"write_file", "replace_in_file"} and not _task_has_edit_intent(self.current_task):
+            return False, "Blocked: the current user message did not explicitly ask to edit files."
+        if tool.name == "run_shell" and not _task_has_shell_intent(self.current_task):
+            command = str(arguments.get("command", ""))
+            if not _looks_read_only_shell(command):
+                return False, "Blocked: the current user message did not explicitly ask to run shell commands."
+        return True, ""
 
     def _resolve(self, raw_path: str | None = None) -> Path:
         raw_path = raw_path or "."
@@ -317,6 +344,64 @@ def _looks_binary(path: Path) -> bool:
     except OSError:
         return True
     return b"\0" in chunk
+
+
+def _task_has_edit_intent(task: str) -> bool:
+    text = task.lower()
+    edit_words = {
+        "add",
+        "change",
+        "create",
+        "delete",
+        "edit",
+        "fix",
+        "implement",
+        "modify",
+        "patch",
+        "refactor",
+        "remove",
+        "rename",
+        "replace",
+        "save",
+        "update",
+        "write",
+    }
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in edit_words)
+
+
+def _task_has_shell_intent(task: str) -> bool:
+    text = task.lower()
+    shell_words = {
+        "build",
+        "check",
+        "compile",
+        "doctor",
+        "execute",
+        "install",
+        "lint",
+        "run",
+        "shell",
+        "start",
+        "test",
+        "terminal",
+        "verify",
+    }
+    return _task_has_edit_intent(task) or any(re.search(rf"\b{re.escape(word)}\b", text) for word in shell_words)
+
+
+def _looks_read_only_shell(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return True
+    base = Path(tokens[0]).name
+    if base in {"ls", "pwd", "find", "rg", "grep", "sed", "cat", "head", "tail", "wc", "du", "df"}:
+        return True
+    if base == "git" and len(tokens) > 1 and tokens[1] in {"status", "log", "show", "diff", "remote", "branch"}:
+        return True
+    return False
 
 
 def _blocked_command_reason(command: str, *, allow_network: bool) -> str | None:
