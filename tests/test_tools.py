@@ -46,13 +46,13 @@ class ToolTests(unittest.TestCase):
             registry = make_registry(Path(directory))
             registry.set_current_task("hello there")
             tool_names = {schema["function"]["name"] for schema in registry.schemas()}
-            self.assertNotIn("replace_in_file", tool_names)
+            self.assertEqual(tool_names, set())
             result = registry.run(
                 "replace_in_file",
                 {"path": "README.md", "old": "Local Agentic AI", "new": "Local Intelligent Agent"},
             )
             self.assertFalse(result["ok"])
-            self.assertIn("did not explicitly ask", result["error"])
+            self.assertIn("not allowed", result["error"])
 
     def test_file_mutation_visible_with_edit_intent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,6 +60,22 @@ class ToolTests(unittest.TestCase):
             registry.set_current_task("update the readme")
             tool_names = {schema["function"]["name"] for schema in registry.schemas()}
             self.assertIn("replace_in_file", tool_names)
+
+    def test_inspection_gets_read_only_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = make_registry(Path(directory))
+            registry.set_current_task("inspect this repository")
+            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
+            self.assertIn("read_file", tool_names)
+            self.assertIn("search_text", tool_names)
+            self.assertNotIn("replace_in_file", tool_names)
+
+    def test_hardware_question_gets_hardware_tool_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = make_registry(Path(directory))
+            registry.set_current_task("what GPU do I have?")
+            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
+            self.assertEqual(tool_names, {"hardware_profile"})
 
 
 if __name__ == "__main__":

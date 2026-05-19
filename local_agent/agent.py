@@ -40,7 +40,7 @@ class LocalAgent:
             self.messages.append(message)
             tool_calls = message.get("tool_calls") or []
             content_tool_calls = False
-            if not tool_calls:
+            if not tool_calls and self.tools.has_visible_tools():
                 tool_calls = self._tool_calls_from_content(str(message.get("content", "")))
                 content_tool_calls = bool(tool_calls)
             if not tool_calls:
