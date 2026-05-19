@@ -33,6 +33,15 @@ class ToolTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("local-only", result["error"])
 
+    def test_shell_can_run_python_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello_world.py").write_text("print('hello world')\n", encoding="utf-8")
+            registry = make_registry(Path(directory))
+            registry.set_current_task("run the file")
+            result = registry.run("run_shell", {"command": "python hello_world.py", "timeout_seconds": 10})
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["stdout"].strip(), "hello world")
+
     def test_search_text(self):
         with tempfile.TemporaryDirectory() as directory:
             registry = make_registry(Path(directory))

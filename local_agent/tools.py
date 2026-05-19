@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -274,7 +275,7 @@ class ToolRegistry:
         }
 
     def _run_shell(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        command = arguments["command"]
+        command = _normalize_shell_command(arguments["command"])
         timeout = int(arguments.get("timeout_seconds", 120))
         blocked = _blocked_command_reason(command, allow_network=self.config.allow_network_tools)
         if blocked:
@@ -340,6 +341,18 @@ def _looks_binary(path: Path) -> bool:
     except OSError:
         return True
     return b"\0" in chunk
+
+
+def _normalize_shell_command(command: str) -> str:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+    if not tokens:
+        return command
+    if Path(tokens[0]).name == "python" and shutil.which("python") is None and shutil.which("python3") is not None:
+        return shlex.join(["python3", *tokens[1:]])
+    return command
 
 
 def _blocked_command_reason(command: str, *, allow_network: bool) -> str | None:

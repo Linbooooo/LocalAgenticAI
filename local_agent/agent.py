@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -116,36 +117,46 @@ class LocalAgent:
 
     @staticmethod
     def _tool_calls_from_content(content: str) -> list[dict[str, Any]]:
-        text = content.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].strip().startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            try:
-                payload, _ = json.JSONDecoder().raw_decode(text)
-            except json.JSONDecodeError:
-                return []
-
+        payloads = _json_payloads_from_content(content)
         calls: list[dict[str, Any]] = []
-        if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
-            raw_calls = payload["tool_calls"]
-        else:
-            raw_calls = [payload]
+        for payload in payloads:
+            if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
+                raw_calls = payload["tool_calls"]
+            else:
+                raw_calls = [payload]
 
-        for raw_call in raw_calls:
-            if not isinstance(raw_call, dict):
-                continue
-            if "function" in raw_call:
-                calls.append(raw_call)
-                continue
-            name = raw_call.get("name") or raw_call.get("tool_name")
-            arguments = raw_call.get("arguments") or raw_call.get("args") or {}
-            if isinstance(name, str) and isinstance(arguments, dict):
-                calls.append({"function": {"name": name, "arguments": arguments}})
+            for raw_call in raw_calls:
+                if not isinstance(raw_call, dict):
+                    continue
+                if "function" in raw_call:
+                    calls.append(raw_call)
+                    continue
+                name = raw_call.get("name") or raw_call.get("tool_name")
+                arguments = raw_call.get("arguments") or raw_call.get("args") or {}
+                if isinstance(name, str) and isinstance(arguments, dict):
+                    calls.append({"function": {"name": name, "arguments": arguments}})
         return calls
+
+
+def _json_payloads_from_content(content: str) -> list[Any]:
+    text = content.strip()
+    payloads: list[Any] = []
+    for candidate in [text, *_fenced_json_blocks(text)]:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            payloads.append(json.loads(candidate))
+            continue
+        except json.JSONDecodeError:
+            pass
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        payloads.append(payload)
+    return payloads
+
+
+def _fenced_json_blocks(text: str) -> list[str]:
+    return [match.group(1) for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)]
