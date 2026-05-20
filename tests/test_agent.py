@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+import tempfile
 
 from local_agent.agent import LocalAgent
+from local_agent.config import AgentConfig
 
 
 class AgentTests(unittest.TestCase):
@@ -35,6 +38,14 @@ class AgentTests(unittest.TestCase):
 
     def test_ignores_regular_content(self):
         self.assertEqual(LocalAgent._tool_calls_from_content("hello there"), [])
+
+    def test_direct_shell_command_bypasses_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = AgentConfig(workspace=Path(directory), trust="auto")
+            config.finalize()
+            agent = LocalAgent(config)
+            result = agent.run('execute "python3 -c \'print(123)\'"')
+            self.assertEqual(result.content.strip(), "123")
 
 
 if __name__ == "__main__":

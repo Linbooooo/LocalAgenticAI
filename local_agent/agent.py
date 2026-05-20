@@ -10,6 +10,7 @@ from .context import prepare_messages
 from .ollama_client import OllamaClient, OllamaConnectionError
 from .prompts import SYSTEM_PROMPT
 from .tools import ToolRegistry
+from .tool_policy import extract_direct_shell_command
 
 
 @dataclass
@@ -30,6 +31,18 @@ class LocalAgent:
     def run(self, task: str) -> AgentResult:
         self.tools.set_current_task(task)
         self.messages.append({"role": "user", "content": task})
+        direct_shell_command = extract_direct_shell_command(task)
+        if direct_shell_command is not None:
+            result = self.tools.run("run_shell", {"command": direct_shell_command, "timeout_seconds": 120})
+            self.messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": "run_shell",
+                    "content": json.dumps(result, ensure_ascii=False),
+                }
+            )
+            return AgentResult(content=_format_shell_result(result), turns=1)
+
         final_content = ""
 
         for turn in range(1, self.config.max_turns + 1):
@@ -160,3 +173,20 @@ def _json_payloads_from_content(content: str) -> list[Any]:
 
 def _fenced_json_blocks(text: str) -> list[str]:
     return [match.group(1) for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)]
+
+
+def _format_shell_result(result: dict[str, Any]) -> str:
+    if not result.get("ok"):
+        error = result.get("error")
+        if error:
+            return str(error)
+    stdout = str(result.get("stdout", "")).strip()
+    stderr = str(result.get("stderr", "")).strip()
+    returncode = result.get("returncode")
+    if stdout and stderr:
+        return f"{stdout}\n\nstderr:\n{stderr}"
+    if stdout:
+        return stdout
+    if stderr:
+        return f"Command exited with {returncode}.\n{stderr}"
+    return f"Command exited with {returncode}."

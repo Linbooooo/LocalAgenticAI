@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 
@@ -30,6 +31,30 @@ def classify_tool_policy(task: str) -> ToolPolicy:
     if _has_read_intent(text):
         return ToolPolicy("read", READ_TOOLS)
     return ToolPolicy("chat", frozenset())
+
+
+def extract_direct_shell_command(task: str) -> str | None:
+    text = task.strip()
+    quoted = re.match(r"^(?:run|execute)\s+(?:the\s+command\s+)?(?:`([^`]+)`|'([^']+)'|\"([^\"]+)\")\s*\.?$", text, re.IGNORECASE)
+    if quoted:
+        return next(group for group in quoted.groups() if group)
+
+    unquoted = re.match(r"^(?:run|execute)\s+(.+?)\s*\.?$", text, re.IGNORECASE)
+    if not unquoted:
+        return None
+    candidate = unquoted.group(1).strip()
+    try:
+        tokens = shlex.split(candidate)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    first = tokens[0]
+    if first in {"it", "that", "the", "this"}:
+        return None
+    if _looks_like_command(first):
+        return candidate
+    return None
 
 
 def _has_edit_intent(text: str) -> bool:
@@ -106,3 +131,19 @@ def _has_read_intent(text: str) -> bool:
 def _contains_word(text: str, words: set[str]) -> bool:
     return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
 
+
+def _looks_like_command(first_token: str) -> bool:
+    command_names = {
+        "cat",
+        "docker",
+        "git",
+        "ls",
+        "make",
+        "node",
+        "npm",
+        "nvidia-smi",
+        "python",
+        "python3",
+        "pytest",
+    }
+    return first_token in command_names or "/" in first_token or "." in first_token or "-" in first_token
