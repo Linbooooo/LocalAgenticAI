@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 
@@ -51,10 +50,6 @@ def _summarize_messages(messages: list[dict[str, Any]]) -> str:
     lines = []
     for message in messages[-16:]:
         role = message.get("role", "message")
-        if role == "tool":
-            tool_name = message.get("tool_name", "tool")
-            lines.append(f"- tool {tool_name}: {_summarize_tool_content(str(message.get('content', '')))}")
-            continue
         content = _one_line(str(message.get("content", "")))
         if content:
             lines.append(f"- {role}: {_truncate(content, 240)}")
@@ -64,27 +59,6 @@ def _summarize_messages(messages: list[dict[str, Any]]) -> str:
     if omitted:
         lines.insert(0, f"- {omitted} older messages omitted.")
     return _truncate("\n".join(lines), 1200)
-
-
-def _summarize_tool_content(content: str) -> str:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return _truncate(_one_line(content), 220)
-
-    if not isinstance(payload, dict):
-        return _truncate(_one_line(content), 220)
-    if payload.get("ok") is False:
-        return f"failed: {_truncate(str(payload.get('error', 'unknown error')), 180)}"
-    parts = ["ok"]
-    for key in ("path", "returncode", "total_lines", "truncated"):
-        if key in payload:
-            parts.append(f"{key}={payload[key]}")
-    if "matches" in payload and isinstance(payload["matches"], list):
-        parts.append(f"matches={len(payload['matches'])}")
-    if "files" in payload and isinstance(payload["files"], list):
-        parts.append(f"files={len(payload['files'])}")
-    return ", ".join(parts)
 
 
 def _estimate_messages(messages: list[dict[str, Any]]) -> int:

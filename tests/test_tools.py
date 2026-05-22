@@ -3,88 +3,50 @@ import unittest
 from pathlib import Path
 
 from local_agent.config import AgentConfig
-from local_agent.tools import ToolRegistry
+from local_agent.tools import WorkspaceTools
 
 
-def make_registry(workspace: Path) -> ToolRegistry:
+def make_tools(workspace: Path) -> WorkspaceTools:
     config = AgentConfig(workspace=workspace, trust="auto")
     config.finalize()
-    return ToolRegistry(config)
+    return WorkspaceTools(config)
 
 
 class ToolTests(unittest.TestCase):
     def test_file_tools_stay_in_workspace(self):
         with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            result = registry.run("write_file", {"path": "hello.txt", "content": "hello\nworld\n"})
+            tools = make_tools(Path(directory))
+            result = tools.write_file("hello.txt", "hello\nworld\n")
             self.assertTrue(result["ok"])
 
-            read = registry.run("read_file", {"path": "hello.txt"})
+            read = tools.read_file("hello.txt")
             self.assertIn("1: hello", read["content"])
 
-            escaped = registry.run("read_file", {"path": "../outside.txt"})
-            self.assertFalse(escaped["ok"])
-            self.assertIn("escapes workspace", escaped["error"])
+            with self.assertRaisesRegex(ValueError, "escapes workspace"):
+                tools.read_file("../outside.txt")
 
     def test_shell_blocks_network_by_default(self):
         with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            result = registry.run("run_shell", {"command": "curl https://example.com"})
+            tools = make_tools(Path(directory))
+            result = tools.run_shell("curl https://example.com")
             self.assertFalse(result["ok"])
             self.assertIn("local-only", result["error"])
 
     def test_shell_can_run_python_script(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "hello_world.py").write_text("print('hello world')\n", encoding="utf-8")
-            registry = make_registry(Path(directory))
-            registry.set_current_task("run the file")
-            result = registry.run("run_shell", {"command": "python hello_world.py", "timeout_seconds": 10})
+            tools = make_tools(Path(directory))
+            result = tools.run_shell("python hello_world.py", timeout_seconds=10)
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["stdout"].strip(), "hello world")
 
     def test_search_text(self):
         with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            registry.run("write_file", {"path": "src/app.py", "content": "def hello():\n    return 'hi'\n"})
-            result = registry.run("search_text", {"pattern": "hello", "path": ".", "file_glob": "*.py"})
+            tools = make_tools(Path(directory))
+            tools.write_file("src/app.py", "def hello():\n    return 'hi'\n")
+            result = tools.search_text("hello", path=".", file_glob="*.py")
             self.assertTrue(result["ok"])
             self.assertEqual(result["matches"][0]["path"], "src/app.py")
-
-    def test_file_mutation_hidden_without_edit_intent(self):
-        with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            registry.set_current_task("hello there")
-            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
-            self.assertEqual(tool_names, set())
-            result = registry.run(
-                "replace_in_file",
-                {"path": "README.md", "old": "Local Agentic AI", "new": "Local Intelligent Agent"},
-            )
-            self.assertFalse(result["ok"])
-            self.assertIn("not allowed", result["error"])
-
-    def test_file_mutation_visible_with_edit_intent(self):
-        with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            registry.set_current_task("update the readme")
-            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
-            self.assertIn("replace_in_file", tool_names)
-
-    def test_inspection_gets_read_only_tools(self):
-        with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            registry.set_current_task("inspect this repository")
-            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
-            self.assertIn("read_file", tool_names)
-            self.assertIn("search_text", tool_names)
-            self.assertNotIn("replace_in_file", tool_names)
-
-    def test_hardware_question_gets_hardware_tool_only(self):
-        with tempfile.TemporaryDirectory() as directory:
-            registry = make_registry(Path(directory))
-            registry.set_current_task("what GPU do I have?")
-            tool_names = {schema["function"]["name"] for schema in registry.schemas()}
-            self.assertEqual(tool_names, {"hardware_profile"})
 
 
 if __name__ == "__main__":

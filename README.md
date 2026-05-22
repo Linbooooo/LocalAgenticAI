@@ -2,15 +2,16 @@
 
 Local Agentic AI is a local-only coding agent backed by Ollama. It can inspect a workspace, answer questions about code, make scoped edits, and run local verification commands while keeping model inference and tool execution on the host machine.
 
-The project is intentionally small: a Python CLI, an Ollama client, a deterministic tool-policy layer, workspace-confined tools, and Docker deployment files.
+The project is intentionally small: a Python CLI, an Ollama client, a deterministic controller, workspace-confined actions, and Docker deployment files.
 
 ## Features
 
 - Local Ollama inference with no required cloud API.
 - Interactive chat and one-shot task execution.
-- Workspace-confined file tools.
-- Intent-gated tool exposure: chat requests get no tools, inspection requests get read-only tools, and edit tools are exposed only for explicit edit requests.
-- Confirmation prompts for mutating tools unless `--yes` is supplied.
+- Workspace-confined file actions.
+- Direct shell command execution for requests like `execute "nvidia-smi"`.
+- Simple request routing for chat, read, hardware, shell, and edit tasks.
+- Confirmation prompts for mutating actions unless `--yes` is supplied.
 - Bounded context packing for longer sessions.
 - Docker and Docker Compose support, including GPU-enabled Ollama deployment.
 
@@ -164,28 +165,27 @@ Request flow:
 
 ```text
 user request
--> deterministic tool policy
--> selected tool schemas
--> Ollama chat request
--> tool execution, if allowed
+-> deterministic controller route
+-> direct local action when appropriate
+-> Ollama chat request when reasoning is needed
 -> final response
 ```
 
 Main components:
 
-- [local_agent/agent.py](local_agent/agent.py): model/tool loop and adaptive context retry.
-- [local_agent/tool_policy.py](local_agent/tool_policy.py): deterministic request classification and allowed tool sets.
-- [local_agent/tools.py](local_agent/tools.py): workspace file tools, shell tool, hardware profile tool, and enforcement.
+- [local_agent/agent.py](local_agent/agent.py): controller flow, model calls, direct commands, and edit handling.
+- [local_agent/tool_policy.py](local_agent/tool_policy.py): small request classifier and direct-command extractor.
+- [local_agent/tools.py](local_agent/tools.py): workspace file actions, shell execution, hardware profile, and safety checks.
 - [local_agent/context.py](local_agent/context.py): bounded context packing.
 - [local_agent/ollama_client.py](local_agent/ollama_client.py): local Ollama HTTP client.
 
-Tool policies:
+Controller routes:
 
-- `chat`: no tools.
-- `read`: `list_files`, `read_file`, `search_text`.
-- `hardware`: `hardware_profile`.
-- `shell`: read tools, hardware tool, and `run_shell`.
-- `edit`: all tools, with mutating tools still confirmation-gated.
+- `chat`: send the request to the model without workspace actions.
+- `read`: gather a small workspace snapshot, then ask the model.
+- `hardware`: gather local hardware/Ollama status, then ask the model.
+- `shell`: run an exact command directly, or ask for clarification if no exact command is present.
+- `edit`: ask the model for one structured edit action, then apply it after confirmation.
 
 ## Safety
 
@@ -193,8 +193,8 @@ Tool policies:
 - Filesystem operations are confined to the configured workspace.
 - Network-capable shell commands are blocked by default.
 - Destructive shell patterns are blocked by default.
-- Mutating tools prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
-- Tool availability is determined before the model call, so casual chat does not expose file or shell tools.
+- Mutating actions prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
+- The controller chooses local actions directly.
 
 ## Context And Performance
 
@@ -204,7 +204,7 @@ The default context is conservative for local hardware:
 - `max_num_ctx`: hard cap used to avoid accidentally loading an oversized context.
 - `min_num_ctx`: lower bound used for automatic retry after memory errors.
 
-Before each model call, older conversation is compacted into a short summary while the current request and recent tool loop remain intact. Exact source details should be re-read with file tools instead of relying on stale context.
+Before each model call, older conversation is compacted into a short summary while the current request remains intact. Read requests include a small deterministic workspace snapshot instead of vector search or a model-driven tool loop.
 
 Use `local-agent doctor` to inspect the active Ollama server, loaded models, context length, and reported VRAM usage. If `size_vram` is `0`, inference is likely CPU-bound.
 

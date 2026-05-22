@@ -19,7 +19,7 @@ class AdaptiveContextTests(unittest.TestCase):
             ]
         )
 
-        result = agent._chat_with_adaptive_context()
+        result = agent._chat()
 
         self.assertEqual(result["message"]["content"], "ok")
         self.assertEqual(agent.config.num_ctx, 4096)

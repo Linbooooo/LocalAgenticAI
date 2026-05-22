@@ -32,19 +32,16 @@ class OllamaClient:
         *,
         model: str,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        options: dict[str, Any],
-        keep_alive: str | int,
+        options: dict[str, Any] | None = None,
+        keep_alive: str | int = "30m",
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": options,
+            "options": options or {},
             "keep_alive": keep_alive,
         }
-        if tools:
-            payload["tools"] = tools
         return self._post("api/chat", payload)
 
     def _get(self, path: str) -> dict[str, Any]:

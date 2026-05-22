@@ -1,51 +1,51 @@
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
+from unittest.mock import Mock
 
 from local_agent.agent import LocalAgent
 from local_agent.config import AgentConfig
 
 
+def make_agent(workspace: Path) -> LocalAgent:
+    config = AgentConfig(workspace=workspace, trust="auto")
+    config.finalize()
+    return LocalAgent(config)
+
+
 class AgentTests(unittest.TestCase):
-    def test_parses_plain_json_tool_call(self):
-        calls = LocalAgent._tool_calls_from_content('{"name": "hardware_profile", "arguments": {}}')
-        self.assertEqual(calls[0]["function"]["name"], "hardware_profile")
-
-    def test_parses_fenced_json_tool_call(self):
-        calls = LocalAgent._tool_calls_from_content(
-            '```json\n{"tool_name": "read_file", "args": {"path": "README.md"}}\n```'
-        )
-        self.assertEqual(calls[0]["function"]["name"], "read_file")
-        self.assertEqual(calls[0]["function"]["arguments"]["path"], "README.md")
-
-    def test_parses_leading_json_tool_call_with_trailing_text(self):
-        calls = LocalAgent._tool_calls_from_content(
-            '{"name": "hardware_profile", "arguments": {}}\n\nI will use the result next.'
-        )
-        self.assertEqual(calls[0]["function"]["name"], "hardware_profile")
-
-    def test_parses_fenced_json_tool_call_inside_prose(self):
-        calls = LocalAgent._tool_calls_from_content(
-            """Try this next:
-
-```json
-{"name": "run_shell", "arguments": {"command": "python3 hello_world.py", "timeout_seconds": 10}}
-```
-"""
-        )
-        self.assertEqual(calls[0]["function"]["name"], "run_shell")
-        self.assertEqual(calls[0]["function"]["arguments"]["command"], "python3 hello_world.py")
-
-    def test_ignores_regular_content(self):
-        self.assertEqual(LocalAgent._tool_calls_from_content("hello there"), [])
-
     def test_direct_shell_command_bypasses_model(self):
         with tempfile.TemporaryDirectory() as directory:
-            config = AgentConfig(workspace=Path(directory), trust="auto")
-            config.finalize()
-            agent = LocalAgent(config)
+            agent = make_agent(Path(directory))
             result = agent.run('execute "python3 -c \'print(123)\'"')
             self.assertEqual(result.content.strip(), "123")
+
+    def test_edit_request_writes_file_from_model_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                return_value={
+                    "message": {
+                        "role": "assistant",
+                        "content": '{"action":"write_file","path":"hello.py","content":"print(\\"hi\\")\\n","message":"Created hello.py."}',
+                    }
+                }
+            )
+            result = agent.run("write a small Python hello file")
+
+            self.assertEqual(result.content, "Created hello.py.")
+            self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), 'print("hi")\n')
+            self.assertEqual(agent.last_written_file, "hello.py")
+
+    def test_run_the_file_uses_last_written_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello.py").write_text("print('hello world')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.last_written_file = "hello.py"
+
+            result = agent.run("run the file for me")
+
+            self.assertEqual(result.content.strip(), "hello world")
 
 
 if __name__ == "__main__":

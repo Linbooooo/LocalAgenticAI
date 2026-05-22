@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .config import AgentConfig
 from .context import prepare_messages
 from .ollama_client import OllamaClient, OllamaConnectionError
-from .prompts import SYSTEM_PROMPT
-from .tools import ToolRegistry
-from .tool_policy import extract_direct_shell_command
+from .prompts import EDIT_PROMPT, SYSTEM_PROMPT
+from .tool_policy import classify_intent, extract_direct_shell_command
+from .tools import WorkspaceTools
 
 
 @dataclass
@@ -23,75 +25,109 @@ class LocalAgent:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
         self.client = OllamaClient(config.ollama_url, timeout=config.ollama_timeout)
-        self.tools = ToolRegistry(config)
+        self.tools = WorkspaceTools(config)
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT.format(workspace=str(config.workspace))}
         ]
+        self.last_written_file: str | None = None
 
     def run(self, task: str) -> AgentResult:
-        self.tools.set_current_task(task)
         self.messages.append({"role": "user", "content": task})
-        direct_shell_command = extract_direct_shell_command(task)
-        if direct_shell_command is not None:
-            result = self.tools.run("run_shell", {"command": direct_shell_command, "timeout_seconds": 120})
-            self.messages.append(
-                {
-                    "role": "tool",
-                    "tool_name": "run_shell",
-                    "content": json.dumps(result, ensure_ascii=False),
-                }
+        intent = classify_intent(task)
+
+        command = extract_direct_shell_command(task) or self._followup_run_command(task)
+        if command:
+            return self._run_shell(command)
+
+        if intent == "hardware":
+            context = _format_json("Local hardware profile", self.tools.hardware_profile())
+            return self._ask(context)
+        if intent == "read":
+            return self._ask(self._workspace_context(task))
+        if intent == "edit":
+            return self._edit(task)
+        if intent == "shell":
+            return self._ask("The user wants to run something, but no exact command was provided. Ask for the exact command if it is ambiguous.")
+        return self._ask()
+
+    def _ask(self, context: str | None = None) -> AgentResult:
+        response = self._chat(context)
+        message = response.get("message", {})
+        content = str(message.get("content", "")).strip()
+        self.messages.append({"role": "assistant", "content": content})
+        return AgentResult(content=content, turns=1)
+
+    def _edit(self, task: str) -> AgentResult:
+        context = self._workspace_context(task)
+        response = self._chat(f"{context}\n\n{EDIT_PROMPT}")
+        content = str(response.get("message", {}).get("content", "")).strip()
+        action = _extract_json_object(content)
+        if not isinstance(action, dict):
+            self.messages.append({"role": "assistant", "content": content})
+            return AgentResult(content=content, turns=1)
+        if action.get("action") == "answer":
+            reply = str(action.get("message", "")).strip()
+            self.messages.append({"role": "assistant", "content": reply})
+            return AgentResult(content=reply, turns=1)
+
+        result = self._apply_edit_action(action)
+        if result.get("ok") and result.get("path"):
+            self.last_written_file = str(result["path"])
+        reply = action.get("message") or _format_action_result(action, result)
+        self.messages.append({"role": "assistant", "content": reply})
+        return AgentResult(content=reply, turns=1)
+
+    def _apply_edit_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        kind = action.get("action")
+        if kind == "write_file":
+            path = str(action.get("path", "")).strip()
+            if not path:
+                return {"ok": False, "error": "Missing file path."}
+            return self.tools.write_file(path, str(action.get("content", "")))
+        if kind == "replace_in_file":
+            old = str(action.get("old", ""))
+            if old == "":
+                return {"ok": False, "error": "Replacement target is empty."}
+            return self.tools.replace_in_file(
+                str(action.get("path", "")),
+                old,
+                str(action.get("new", "")),
+                int(action.get("max_replacements", 1)),
             )
-            return AgentResult(content=_format_shell_result(result), turns=1)
+        return {"ok": False, "error": f"Unknown edit action: {kind}"}
 
-        final_content = ""
+    def _run_shell(self, command: str) -> AgentResult:
+        result = self.tools.run_shell(command)
+        self.messages.append({"role": "assistant", "content": _format_shell_result(result)})
+        return AgentResult(content=_format_shell_result(result), turns=1)
 
-        for turn in range(1, self.config.max_turns + 1):
-            response = self._chat_with_adaptive_context()
-            message = response.get("message", {})
-            if not message:
-                raise RuntimeError(f"Ollama response did not contain a message: {response}")
+    def _followup_run_command(self, task: str) -> str | None:
+        text = task.lower()
+        if "run" not in text or not self.last_written_file:
+            return None
+        if "file" not in text and "script" not in text and "it" not in text:
+            return None
+        path = shlex.quote(self.last_written_file)
+        return f"python3 {path}" if self.last_written_file.endswith(".py") else path
 
-            self.messages.append(message)
-            tool_calls = message.get("tool_calls") or []
-            content_tool_calls = False
-            if not tool_calls and self.tools.has_visible_tools():
-                tool_calls = self._tool_calls_from_content(str(message.get("content", "")))
-                content_tool_calls = bool(tool_calls)
-            if not tool_calls:
-                final_content = str(message.get("content", "")).strip()
-                break
+    def _workspace_context(self, task: str) -> str:
+        listing = self.tools.list_files(max_depth=3, limit=120)
+        files = listing.get("files", []) if listing.get("ok") else []
+        selected = _select_context_files(task, files)
+        parts = [_format_json("Workspace files", listing)]
+        for path in selected:
+            result = self.tools.read_file(path, max_lines=160)
+            if result.get("ok"):
+                parts.append(f"File: {path}\n{result['content']}")
+        return "\n\n".join(parts)
 
-            for call in tool_calls:
-                tool_name, arguments = self._parse_tool_call(call)
-                result = self.tools.run(tool_name, arguments)
-                result_json = json.dumps(result, ensure_ascii=False)
-                if content_tool_calls:
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": f"Tool result for {tool_name}:\n{result_json}\nUse this result and continue.",
-                        }
-                    )
-                else:
-                    self.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_name": tool_name,
-                            "content": result_json,
-                        }
-                    )
-        else:
-            final_content = "Stopped after reaching the configured turn limit."
-
-        return AgentResult(content=final_content, turns=min(len(self.messages), self.config.max_turns))
-
-    def _chat_with_adaptive_context(self) -> dict[str, Any]:
+    def _chat(self, context: str | None = None) -> dict[str, Any]:
+        messages = self._messages_with_context(context)
         while True:
             try:
                 return self.client.chat(
                     model=self.config.model,
-                    messages=prepare_messages(self.messages, self.config.context_budget_tokens()),
-                    tools=self.tools.schemas(),
+                    messages=prepare_messages(messages, self.config.context_budget_tokens()),
                     options=self.config.ollama_options(),
                     keep_alive=self.config.keep_alive,
                 )
@@ -102,84 +138,61 @@ class LocalAgent:
                 if self.config.num_ctx <= self.config.min_num_ctx:
                     raise
                 self.config.num_ctx = max(self.config.min_num_ctx, self.config.num_ctx // 2)
-                self.messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "The local inference server rejected the previous request because of memory pressure. "
-                            f"Retrying with num_ctx={self.config.num_ctx}."
-                        ),
-                    }
-                )
 
-    @staticmethod
-    def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        function = call.get("function") or {}
-        name = function.get("name")
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"Tool call did not include a function name: {call}")
-
-        raw_args = function.get("arguments") or {}
-        if isinstance(raw_args, str):
-            arguments = json.loads(raw_args) if raw_args.strip() else {}
-        elif isinstance(raw_args, dict):
-            arguments = raw_args
-        else:
-            raise ValueError(f"Tool call arguments must be an object or JSON string: {call}")
-        return name, arguments
-
-    @staticmethod
-    def _tool_calls_from_content(content: str) -> list[dict[str, Any]]:
-        payloads = _json_payloads_from_content(content)
-        calls: list[dict[str, Any]] = []
-        for payload in payloads:
-            if isinstance(payload, dict) and isinstance(payload.get("tool_calls"), list):
-                raw_calls = payload["tool_calls"]
-            else:
-                raw_calls = [payload]
-
-            for raw_call in raw_calls:
-                if not isinstance(raw_call, dict):
-                    continue
-                if "function" in raw_call:
-                    calls.append(raw_call)
-                    continue
-                name = raw_call.get("name") or raw_call.get("tool_name")
-                arguments = raw_call.get("arguments") or raw_call.get("args") or {}
-                if isinstance(name, str) and isinstance(arguments, dict):
-                    calls.append({"function": {"name": name, "arguments": arguments}})
-        return calls
+    def _messages_with_context(self, context: str | None) -> list[dict[str, Any]]:
+        if not context:
+            return self.messages
+        return [self.messages[0], {"role": "system", "content": context}, *self.messages[1:]]
 
 
-def _json_payloads_from_content(content: str) -> list[Any]:
-    text = content.strip()
-    payloads: list[Any] = []
-    for candidate in [text, *_fenced_json_blocks(text)]:
-        candidate = candidate.strip()
-        if not candidate:
-            continue
+def _select_context_files(task: str, files: list[str]) -> list[str]:
+    lower_task = task.lower()
+    defaults = {"readme.md", "pyproject.toml", "package.json", "cargo.toml"}
+    selected: list[str] = []
+    for path in files:
+        name = Path(path).name.lower()
+        if name in defaults or name in lower_task or path.lower() in lower_task:
+            selected.append(path)
+        if len(selected) >= 6:
+            break
+    return selected
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    candidates = [text.strip(), *_fenced_blocks(text)]
+    for candidate in candidates:
         try:
-            payloads.append(json.loads(candidate))
-            continue
+            value = json.loads(candidate)
         except json.JSONDecodeError:
-            pass
-        try:
-            payload, _ = json.JSONDecoder().raw_decode(candidate)
-        except json.JSONDecodeError:
-            continue
-        payloads.append(payload)
-    return payloads
+            match = re.search(r"\{.*\}", candidate, re.DOTALL)
+            if not match:
+                continue
+            try:
+                value = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                continue
+        if isinstance(value, dict):
+            return value
+    return None
 
 
-def _fenced_json_blocks(text: str) -> list[str]:
-    return [match.group(1) for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)]
+def _fenced_blocks(text: str) -> list[str]:
+    return [match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)]
+
+
+def _format_json(title: str, value: Any) -> str:
+    return f"{title}:\n{json.dumps(value, indent=2, ensure_ascii=False)}"
+
+
+def _format_action_result(action: dict[str, Any], result: dict[str, Any]) -> str:
+    if result.get("ok"):
+        return f"{action.get('action')} completed: {result.get('path', '')}".strip()
+    return str(result.get("error", "Edit action failed."))
 
 
 def _format_shell_result(result: dict[str, Any]) -> str:
-    if not result.get("ok"):
-        error = result.get("error")
-        if error:
-            return str(error)
+    if not result.get("ok") and result.get("error"):
+        return str(result["error"])
     stdout = str(result.get("stdout", "")).strip()
     stderr = str(result.get("stderr", "")).strip()
     returncode = result.get("returncode")

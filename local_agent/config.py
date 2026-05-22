@@ -28,7 +28,6 @@ class AgentConfig:
     ollama_timeout: int = 300
     trust: str = "ask"
     allow_network_tools: bool = False
-    max_turns: int = 24
 
     @classmethod
     def load(cls, path: Path | None) -> "AgentConfig":
@@ -62,7 +61,6 @@ class AgentConfig:
             "LOCAL_AGENT_KEEP_ALIVE": ("keep_alive", str),
             "LOCAL_AGENT_OLLAMA_TIMEOUT": ("ollama_timeout", int),
             "LOCAL_AGENT_TRUST": ("trust", str),
-            "LOCAL_AGENT_MAX_TURNS": ("max_turns", int),
         }
         for env_name, (field_name, converter) in env_map.items():
             value = os.environ.get(env_name)
