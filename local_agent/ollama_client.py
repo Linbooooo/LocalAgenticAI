@@ -34,6 +34,7 @@ class OllamaClient:
         messages: list[dict[str, Any]],
         options: dict[str, Any] | None = None,
         keep_alive: str | int = "30m",
+        response_format: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -42,6 +43,8 @@ class OllamaClient:
             "options": options or {},
             "keep_alive": keep_alive,
         }
+        if response_format is not None:
+            payload["format"] = response_format
         return self._post("api/chat", payload)
 
     def _get(self, path: str) -> dict[str, Any]:

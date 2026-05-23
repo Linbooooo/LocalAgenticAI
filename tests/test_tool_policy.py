@@ -9,6 +9,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_repo_inspection_is_read(self):
         self.assertEqual(classify_intent("inspect this repository"), "read")
+        self.assertEqual(classify_intent("display your solution"), "read")
 
     def test_edit_request_is_edit(self):
         self.assertEqual(classify_intent("update the README"), "edit")

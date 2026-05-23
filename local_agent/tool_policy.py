@@ -12,7 +12,7 @@ def classify_intent(task: str) -> str:
         return "shell"
     if _has_any(text, {"cpu", "gpu", "hardware", "memory", "ollama", "ram", "vram"}):
         return "hardware"
-    if _has_any(text, {"analyze", "codebase", "explain", "file", "files", "find", "inspect", "list", "look", "read", "repo", "repository", "review", "search", "show", "summarize", "tell", "what", "where"}):
+    if _has_any(text, {"analyze", "codebase", "display", "explain", "file", "files", "find", "inspect", "list", "look", "read", "repo", "repository", "review", "search", "show", "summarize", "tell", "what", "where"}):
         return "read"
     return "chat"
 
@@ -43,4 +43,3 @@ def _has_any(text: str, words: set[str]) -> bool:
 def _looks_like_command(first_token: str) -> bool:
     known = {"cat", "docker", "git", "ls", "make", "node", "npm", "nvidia-smi", "python", "python3", "pytest"}
     return first_token in known or "/" in first_token or "." in first_token or "-" in first_token
-

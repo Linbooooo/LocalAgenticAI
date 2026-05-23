@@ -10,6 +10,7 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - Interactive chat and one-shot task execution.
 - Workspace-confined file actions.
 - Direct shell command execution for requests like `execute "nvidia-smi"`.
+- Iterative action loop for multi-step work such as editing, running tests, and responding with real output.
 - Simple request routing for chat, read, hardware, shell, and edit tasks.
 - Confirmation prompts for mutating actions unless `--yes` is supplied.
 - Bounded context packing for longer sessions.
@@ -142,7 +143,8 @@ Example:
   "keep_alive": "30m",
   "ollama_timeout": 300,
   "trust": "ask",
-  "allow_network_tools": false
+  "allow_network_tools": false,
+  "max_steps": 24
 }
 ```
 
@@ -158,6 +160,7 @@ Supported environment variables:
 - `LOCAL_AGENT_TRUST`
 - `LOCAL_AGENT_ALLOW_NETWORK_TOOLS`
 - `LOCAL_AGENT_OLLAMA_TIMEOUT`
+- `LOCAL_AGENT_MAX_STEPS`
 
 ## Architecture
 
@@ -167,13 +170,14 @@ Request flow:
 user request
 -> deterministic controller route
 -> direct local action when appropriate
--> Ollama chat request when reasoning is needed
+-> iterative local action loop when work requires multiple steps
+-> Ollama chat request when reasoning only is needed
 -> final response
 ```
 
 Main components:
 
-- [local_agent/agent.py](local_agent/agent.py): controller flow, model calls, direct commands, and edit handling.
+- [local_agent/agent.py](local_agent/agent.py): controller flow, model calls, direct commands, and iterative action handling.
 - [local_agent/tool_policy.py](local_agent/tool_policy.py): small request classifier and direct-command extractor.
 - [local_agent/tools.py](local_agent/tools.py): workspace file actions, shell execution, hardware profile, and safety checks.
 - [local_agent/context.py](local_agent/context.py): bounded context packing.
@@ -182,10 +186,12 @@ Main components:
 Controller routes:
 
 - `chat`: send the request to the model without workspace actions.
-- `read`: gather a small workspace snapshot, then ask the model.
+- `read`: let the model inspect local files through read-only actions, then answer.
 - `hardware`: gather local hardware/Ollama status, then ask the model.
-- `shell`: run an exact command directly, or ask for clarification if no exact command is present.
-- `edit`: ask the model for one structured edit action, then apply it after confirmation.
+- `shell`: run an exact command directly, or let the model choose local shell actions when the command is implicit.
+- `edit`: let the model edit, run checks, inspect results, and continue until it can give a final answer.
+
+Action-mode model responses go through a protocol layer before execution. The controller requests JSON-mode output from Ollama, validates required action fields, retries malformed responses, and can salvage an obvious Python code block into a named file write when the user explicitly asked to create that file.
 
 ## Safety
 
@@ -194,7 +200,8 @@ Controller routes:
 - Network-capable shell commands are blocked by default.
 - Destructive shell patterns are blocked by default.
 - Mutating actions prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
-- The controller chooses local actions directly.
+- The deterministic controller decides whether actions are allowed; the model decides the next step only inside that action-enabled mode.
+- Malformed or incomplete action responses are rejected and retried before any local side effect runs.
 
 ## Context And Performance
 
@@ -204,7 +211,7 @@ The default context is conservative for local hardware:
 - `max_num_ctx`: hard cap used to avoid accidentally loading an oversized context.
 - `min_num_ctx`: lower bound used for automatic retry after memory errors.
 
-Before each model call, older conversation is compacted into a short summary while the current request remains intact. Read requests include a small deterministic workspace snapshot instead of vector search or a model-driven tool loop.
+Before each model call, older conversation is compacted into a short summary while the current request remains intact. Action-mode requests include a small deterministic workspace snapshot and previous action results instead of vector search.
 
 Use `local-agent doctor` to inspect the active Ollama server, loaded models, context length, and reported VRAM usage. If `size_vram` is `0`, inference is likely CPU-bound.
 

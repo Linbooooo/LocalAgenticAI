@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="Override the model name.")
     parser.add_argument("--workspace", type=Path, help="Workspace the agent may read and edit.")
     parser.add_argument("--yes", action="store_true", help="Allow mutating tools without interactive prompts.")
+    parser.add_argument("--max-steps", type=int, help="Maximum agent action steps before stopping.")
     return parser
 
 
@@ -33,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         config.workspace = args.workspace
     if args.yes:
         config.trust = "auto"
+    if args.max_steps:
+        config.max_steps = args.max_steps
     config.finalize()
 
     command = args.command[0] if args.command else "chat"

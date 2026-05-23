@@ -28,6 +28,7 @@ class AgentConfig:
     ollama_timeout: int = 300
     trust: str = "ask"
     allow_network_tools: bool = False
+    max_steps: int = 24
 
     @classmethod
     def load(cls, path: Path | None) -> "AgentConfig":
@@ -61,6 +62,7 @@ class AgentConfig:
             "LOCAL_AGENT_KEEP_ALIVE": ("keep_alive", str),
             "LOCAL_AGENT_OLLAMA_TIMEOUT": ("ollama_timeout", int),
             "LOCAL_AGENT_TRUST": ("trust", str),
+            "LOCAL_AGENT_MAX_STEPS": ("max_steps", int),
         }
         for env_name, (field_name, converter) in env_map.items():
             value = os.environ.get(env_name)
@@ -89,6 +91,8 @@ class AgentConfig:
             self.num_ctx = self.max_num_ctx
         if self.num_ctx < self.min_num_ctx:
             self.num_ctx = self.min_num_ctx
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be at least 1.")
         self.workspace = self.workspace.expanduser().resolve()
         if not self.workspace.exists():
             raise ValueError(f"Workspace does not exist: {self.workspace}")

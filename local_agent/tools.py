@@ -39,7 +39,14 @@ class WorkspaceTools:
 
     def read_file(self, path: str, start_line: int = 1, max_lines: int = 200) -> dict[str, Any]:
         file_path = self._resolve(path)
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if not file_path.exists():
+            return {"ok": False, "error": f"Path does not exist: {path}"}
+        if file_path.is_dir():
+            return {"ok": False, "error": f"Path is a directory: {path}"}
+        try:
+            lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
         start_index = max(start_line - 1, 0)
         selected = lines[start_index : start_index + max_lines]
         numbered = [f"{start_index + index + 1}: {line}" for index, line in enumerate(selected)]
@@ -59,8 +66,13 @@ class WorkspaceTools:
         max_matches: int = 100,
     ) -> dict[str, Any]:
         root = self._resolve(path)
+        if not root.exists():
+            return {"ok": False, "error": f"Path does not exist: {path}"}
         flags = 0 if case_sensitive else re.IGNORECASE
-        regex = re.compile(pattern, flags)
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as exc:
+            return {"ok": False, "error": f"Invalid search pattern: {exc}"}
         matches: list[dict[str, Any]] = []
 
         for file_path in _iter_text_files(root, self.config.workspace, file_glob):
@@ -89,7 +101,14 @@ class WorkspaceTools:
         if not self._confirm("replace_in_file", {"path": path, "max_replacements": max_replacements}):
             return {"ok": False, "error": "User declined tool execution."}
         file_path = self._resolve(path)
-        content = file_path.read_text(encoding="utf-8")
+        if not file_path.exists():
+            return {"ok": False, "error": f"Path does not exist: {path}"}
+        if file_path.is_dir():
+            return {"ok": False, "error": f"Path is a directory: {path}"}
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
         count = content.count(old)
         if count == 0:
             return {"ok": False, "error": "Old text not found."}
@@ -108,20 +127,28 @@ class WorkspaceTools:
         if not self._confirm("run_shell", {"command": command, "timeout_seconds": timeout_seconds}):
             return {"ok": False, "error": "User declined tool execution."}
 
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=self.config.workspace,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            executable="/bin/bash" if os.name == "posix" else None,
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.config.workspace,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                executable="/bin/bash" if os.name == "posix" else None,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "error": f"Command timed out after {timeout_seconds}s.",
+                "stdout": _tail_text(exc.stdout),
+                "stderr": _tail_text(exc.stderr),
+            }
         return {
             "ok": completed.returncode == 0,
             "returncode": completed.returncode,
-            "stdout": completed.stdout[-12000:],
-            "stderr": completed.stderr[-12000:],
+            "stdout": _tail_text(completed.stdout),
+            "stderr": _tail_text(completed.stderr),
         }
 
     def hardware_profile(self) -> dict[str, Any]:
@@ -177,6 +204,14 @@ def _normalize_shell_command(command: str) -> str:
     return command
 
 
+def _tail_text(value: str | bytes | None, limit: int = 12000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value[-limit:]
+
+
 def _blocked_command_reason(command: str, *, allow_network: bool) -> str | None:
     try:
         tokens = shlex.split(command)
@@ -213,4 +248,3 @@ def _blocked_command_reason(command: str, *, allow_network: bool) -> str | None:
     if "rm" in lowered and any("r" in token and "f" in token for token in lowered if token.startswith("-")):
         return "Blocked because the command looks destructive."
     return None
-
