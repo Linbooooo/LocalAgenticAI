@@ -49,20 +49,15 @@ class AgentTests(unittest.TestCase):
                             "content": '{"action":"write_file","path":"hello.py","content":"print(\\"hi\\")\\n"}',
                         }
                     },
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": '{"action":"finish","message":"Created hello.py."}',
-                        }
-                    },
                 ]
             )
             result = agent.run("write a small Python hello file")
 
-            self.assertEqual(result.content, "Created hello.py.")
+            self.assertEqual(result.content, "Created `hello.py`.")
             self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), 'print("hi")\n')
             self.assertEqual(agent.last_written_file, "hello.py")
-            self.assertEqual(result.turns, 2)
+            self.assertEqual(result.turns, 1)
+            self.assertEqual(agent.client.chat.call_count, 2)
 
     def test_action_loop_can_write_then_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -170,7 +165,7 @@ class AgentTests(unittest.TestCase):
                 ]
             )
 
-            result = agent.run("write a small Python hello file")
+            result = agent.run("update project files for the Python hello example")
 
             self.assertEqual(result.content, "Created hello.py.")
             self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), 'print("hi")\n')
@@ -232,9 +227,9 @@ class AgentTests(unittest.TestCase):
 
             result = agent.run("write a new file named hello.py")
 
-            self.assertEqual(result.content, "Created hello.py.")
+            self.assertEqual(result.content, "Created `hello.py`.")
             self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), 'print("field ok")\n')
-            self.assertEqual(agent.client.chat.call_count, 4)
+            self.assertEqual(agent.client.chat.call_count, 3)
 
     def test_python_code_block_is_salvaged_to_named_file(self):
         with tempfile.TemporaryDirectory() as directory:

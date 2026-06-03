@@ -138,6 +138,10 @@ class LocalAgent:
             )
             if result.get("ok") and result.get("path"):
                 self.last_written_file = str(result["path"])
+            if _should_stop_after_simple_edit(task, intent, requires_run, observations):
+                reply = _format_final_reply(_simple_edit_reply(observations[-1]), observations)
+                self.messages.append({"role": "assistant", "content": reply})
+                return AgentResult(content=reply, turns=step)
             if _should_stop_after_success(intent, requires_run, observations):
                 reply = _format_final_reply("Completed and verified successfully.", observations)
                 self.messages.append({"role": "assistant", "content": reply})
@@ -554,6 +558,71 @@ def _should_stop_after_success(intent: str, requires_run: bool, observations: li
         return False
     latest_step = int(latest.get("step", 0))
     return 0 < _last_successful_change_step(observations) < latest_step
+
+
+def _should_stop_after_simple_edit(
+    task: str,
+    intent: str,
+    requires_run: bool,
+    observations: list[dict[str, Any]],
+) -> bool:
+    if intent != "edit" or requires_run or not observations:
+        return False
+    if not _looks_like_simple_single_file_edit(task):
+        return False
+    if _successful_change_count(observations) != 1:
+        return False
+    latest = observations[-1]
+    if latest.get("action", {}).get("action") not in {"write_file", "replace_in_file"}:
+        return False
+    return bool(latest.get("result", {}).get("ok") and latest.get("result", {}).get("path"))
+
+
+def _successful_change_count(observations: list[dict[str, Any]]) -> int:
+    return sum(
+        1
+        for observation in observations
+        if observation.get("action", {}).get("action") in {"write_file", "replace_in_file"}
+        and observation.get("result", {}).get("ok")
+    )
+
+
+def _looks_like_simple_single_file_edit(task: str) -> bool:
+    text = task.lower()
+    if not any(marker in text for marker in {"file", "script", ".py"}):
+        return False
+    multi_step_markers = {
+        " and ",
+        " then ",
+        " also ",
+        "test",
+        "tests",
+        "unittest",
+        "pytest",
+        "run",
+        "verify",
+        "check",
+        "fix",
+        "debug",
+        "refactor",
+        "multiple",
+        "several",
+        "both",
+    }
+    if any(marker in text for marker in multi_step_markers):
+        return False
+    if re.search(r"\bfiles\b", text):
+        return False
+    if re.search(r"\b(two|three|four|five|\d+)\s+files?\b", text):
+        return False
+    return True
+
+
+def _simple_edit_reply(observation: dict[str, Any]) -> str:
+    action_name = observation.get("action", {}).get("action")
+    path = observation.get("result", {}).get("path", "the requested file")
+    verb = "Updated" if action_name == "replace_in_file" else "Created"
+    return f"{verb} `{path}`."
 
 
 def _bool_value(value: Any) -> bool:
