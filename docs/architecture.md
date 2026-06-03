@@ -7,7 +7,7 @@ flowchart TD
     A["User request"] --> B["LocalAgent.run()"]
 
     B --> C["Exact command check"]
-    C -->|execute \"...\"| D["Run shell directly"]
+    C -->|direct command| D["Run shell directly"]
     C -->|not exact command| E["LLM semantic router"]
 
     E --> F["Validate route"]
