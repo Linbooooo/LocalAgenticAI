@@ -40,6 +40,22 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["stdout"].strip(), "hello world")
 
+    def test_shell_runs_test_files_with_unittest_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            test_dir = Path(directory, "tests")
+            test_dir.mkdir()
+            Path(test_dir, "test_sample.py").write_text(
+                "import unittest\n\n"
+                "class SampleTests(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertEqual(1 + 1, 2)\n",
+                encoding="utf-8",
+            )
+            tools = make_tools(Path(directory))
+            result = tools.run_shell("python3 tests/test_sample.py", timeout_seconds=10)
+            self.assertTrue(result["ok"], result)
+            self.assertIn("OK", result["stderr"])
+
     def test_search_text(self):
         with tempfile.TemporaryDirectory() as directory:
             tools = make_tools(Path(directory))

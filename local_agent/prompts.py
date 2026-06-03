@@ -11,6 +11,24 @@ Operating rules:
 - Be concise with the user, but preserve important details.
 """
 
+ROUTER_PROMPT = """Classify the user's request for a local coding assistant.
+
+Return exactly one JSON object with no markdown:
+{"mode":"chat|read|edit|shell|hardware","requires_run":false,"confidence":0.0,"reason":"short reason"}
+
+Mode meanings:
+- chat: ordinary conversation, explanation, brainstorming, or no workspace action needed.
+- read: inspect, search, explain, summarize, or display local workspace content without changing files or running commands.
+- edit: create, modify, delete, fix, refactor, or generate files. Use requires_run=true when the user also asks to run, test, check, or verify.
+- shell: run a local command or start/check/build/test something without file edits.
+- hardware: answer using local CPU/GPU/RAM/Ollama status.
+
+Safety:
+- Do not classify casual greetings or broad conversation as edit or shell.
+- Prefer chat when intent is ambiguous.
+- Use confidence below 0.70 when the request is ambiguous.
+"""
+
 ACTION_PROMPT = """For this local work request, choose the next action and return exactly one JSON object with no markdown.
 
 Allowed actions:
@@ -28,6 +46,7 @@ Rules:
 - Continue working until the user's request is complete, then use finish.
 - If the user asks to run, test, check, or verify the result, do not claim success until a run_shell action has produced real output.
 - Prefer python3 over python for Python commands.
+- Run unittest files under tests/test_*.py with python3 -m unittest discover -s tests -p <filename>.
 - Commands must be local workspace commands.
 - Use read_file, list_files, or search_text when more local context is needed.
 - Base finish messages only on previous action results. Do not invent prior state or test results.

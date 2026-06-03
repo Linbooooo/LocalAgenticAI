@@ -200,8 +200,20 @@ def _normalize_shell_command(command: str) -> str:
     except ValueError:
         return command
     if tokens and Path(tokens[0]).name == "python" and shutil.which("python") is None and shutil.which("python3") is not None:
-        return shlex.join(["python3", *tokens[1:]])
-    return command
+        tokens = ["python3", *tokens[1:]]
+    test_command = _unittest_discover_command(tokens)
+    if test_command:
+        return test_command
+    return shlex.join(tokens) if tokens else command
+
+
+def _unittest_discover_command(tokens: list[str]) -> str | None:
+    if len(tokens) != 2 or Path(tokens[0]).name not in {"python", "python3"}:
+        return None
+    path = Path(tokens[1].replace("\\", "/"))
+    if len(path.parts) >= 2 and path.parts[0] == "tests" and path.name.startswith("test_") and path.suffix == ".py":
+        return f"python3 -m unittest discover -s tests -p {shlex.quote(path.name)}"
+    return None
 
 
 def _tail_text(value: str | bytes | None, limit: int = 12000) -> str:

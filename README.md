@@ -2,7 +2,7 @@
 
 Local Agentic AI is a local-only coding agent backed by Ollama. It can inspect a workspace, answer questions about code, make scoped edits, and run local verification commands while keeping model inference and tool execution on the host machine.
 
-The project is intentionally small: a Python CLI, an Ollama client, a deterministic controller, workspace-confined actions, and Docker deployment files.
+The project is intentionally small: a Python CLI, an Ollama client, a deterministic control layer implemented by `LocalAgent`, workspace-confined actions, and Docker deployment files.
 
 ## Features
 
@@ -11,7 +11,8 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - Workspace-confined file actions.
 - Direct shell command execution for requests like `execute "nvidia-smi"`.
 - Iterative action loop for multi-step work such as editing, running tests, and responding with real output.
-- Simple request routing for chat, read, hardware, shell, and edit tasks.
+- Model-based semantic routing for chat, read, hardware, shell, and edit tasks.
+- Lightweight coding skills for project discovery, Python testing, debugging, and algorithm verification.
 - Confirmation prompts for mutating actions unless `--yes` is supplied.
 - Bounded context packing for longer sessions.
 - Docker and Docker Compose support, including GPU-enabled Ollama deployment.
@@ -164,11 +165,14 @@ Supported environment variables:
 
 ## Architecture
 
+See [docs/architecture.md](docs/architecture.md) for a Mermaid flowchart of the agent loop.
+
 Request flow:
 
 ```text
 user request
--> deterministic controller route
+-> exact direct command check
+-> model-based semantic route validated by LocalAgent
 -> direct local action when appropriate
 -> iterative local action loop when work requires multiple steps
 -> Ollama chat request when reasoning only is needed
@@ -177,13 +181,14 @@ user request
 
 Main components:
 
-- [local_agent/agent.py](local_agent/agent.py): controller flow, model calls, direct commands, and iterative action handling.
-- [local_agent/tool_policy.py](local_agent/tool_policy.py): small request classifier and direct-command extractor.
+- [local_agent/agent.py](local_agent/agent.py): `LocalAgent`, which implements the control flow, model calls, direct commands, and iterative action handling.
+- [local_agent/skills.py](local_agent/skills.py): compact procedural coding skills selected for relevant action requests.
+- [local_agent/tool_policy.py](local_agent/tool_policy.py): exact direct-command extractor.
 - [local_agent/tools.py](local_agent/tools.py): workspace file actions, shell execution, hardware profile, and safety checks.
 - [local_agent/context.py](local_agent/context.py): bounded context packing.
 - [local_agent/ollama_client.py](local_agent/ollama_client.py): local Ollama HTTP client.
 
-Controller routes:
+`LocalAgent` routes after asking the model for a semantic route:
 
 - `chat`: send the request to the model without workspace actions.
 - `read`: let the model inspect local files through read-only actions, then answer.
@@ -191,7 +196,31 @@ Controller routes:
 - `shell`: run an exact command directly, or let the model choose local shell actions when the command is implicit.
 - `edit`: let the model edit, run checks, inspect results, and continue until it can give a final answer.
 
-Action-mode model responses go through a protocol layer before execution. The controller requests JSON-mode output from Ollama, validates required action fields, retries malformed responses, and can salvage an obvious Python code block into a named file write when the user explicitly asked to create that file.
+Routing and action-mode responses go through protocol layers before execution. `LocalAgent` requests JSON-mode route/action output from Ollama, validates required fields, downgrades low-confidence action routes to chat, retries malformed action responses, and can salvage an obvious Python code block into a named file write when the user explicitly asked to create that file.
+
+## Coding Skills
+
+Skills are not extra tools. They are small instruction packs injected into the action prompt when the task and workspace call for them. The model still chooses actions, and the deterministic tool layer still validates and executes those actions.
+
+Current built-in skills:
+
+- `coding-change`: inspect relevant code, keep edits scoped, and verify before claiming success.
+- `project-discovery`: infer layout from files such as `pyproject.toml`, `README.md`, `Makefile`, package manifests, and tests.
+- `python-testing`: prefer `python3`, run `tests/test_*.py` through unittest discovery from the workspace root, and avoid import fixes when the issue is direct test-file execution.
+- `debugging`: classify failures from real output, fix one likely root cause, and rerun the narrowest relevant command.
+- `algorithm-verification`: test algorithmic solutions with edge cases, independent expected values, and validity checks when multiple outputs are acceptable.
+
+This keeps common coding workflows close to the agent without widening the tool permission surface.
+
+## Evaluation
+
+Evaluate the agent at three levels:
+
+- Unit tests for the harness: routing validation, skill selection, action protocol repair, shell normalization, stop-on-success behavior, and workspace safety.
+- Offline coding tasks: fixed prompts in temporary workspaces with assertions on final files, command results, number of steps, and whether the agent verified its work.
+- Live model scorecards: run the same task set after model, prompt, or skill changes and track pass rate, unnecessary tool calls, repeated actions, failed imports, false success claims, and average steps to completion.
+
+Good eval tasks should cover simple file creation, existing-code edits, Python test generation, traceback repair, package import handling, and medium algorithm problems where expected outputs can be independently checked.
 
 ## Safety
 
@@ -200,7 +229,7 @@ Action-mode model responses go through a protocol layer before execution. The co
 - Network-capable shell commands are blocked by default.
 - Destructive shell patterns are blocked by default.
 - Mutating actions prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
-- The deterministic controller decides whether actions are allowed; the model decides the next step only inside that action-enabled mode.
+- The model decides the semantic route; the deterministic `LocalAgent` control layer validates that route and enforces safety boundaries before any tool runs.
 - Malformed or incomplete action responses are rejected and retried before any local side effect runs.
 
 ## Context And Performance

@@ -11,8 +11,9 @@ from typing import Any
 from .config import AgentConfig
 from .context import prepare_messages
 from .ollama_client import OllamaClient, OllamaConnectionError
-from .prompts import ACTION_PROMPT, SYSTEM_PROMPT
-from .tool_policy import classify_intent, extract_direct_shell_command
+from .prompts import ACTION_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
+from .skills import format_coding_skills, select_coding_skills
+from .tool_policy import extract_direct_shell_command
 from .tools import WorkspaceTools
 
 
@@ -20,6 +21,14 @@ from .tools import WorkspaceTools
 class AgentResult:
     content: str
     turns: int
+
+
+@dataclass
+class RouteDecision:
+    mode: str
+    requires_run: bool = False
+    confidence: float = 0.0
+    reason: str = ""
 
 
 class LocalAgent:
@@ -36,21 +45,21 @@ class LocalAgent:
 
     def run(self, task: str) -> AgentResult:
         self.messages.append({"role": "user", "content": task})
-        intent = classify_intent(task)
 
         command = extract_direct_shell_command(task) or self._followup_run_command(task)
         if command:
             return self._run_shell(command)
 
-        if intent == "hardware":
+        route = self._route_task(task)
+        if route.mode == "hardware":
             context = _format_json("Local hardware profile", self.tools.hardware_profile())
             return self._ask(context)
-        if intent == "read":
-            return self._act(task, intent)
-        if intent == "edit":
-            return self._act(task, intent)
-        if intent == "shell":
-            return self._act(task, intent)
+        if route.mode == "read":
+            return self._act(task, route.mode, route.requires_run)
+        if route.mode == "edit":
+            return self._act(task, route.mode, route.requires_run)
+        if route.mode == "shell":
+            return self._act(task, route.mode, route.requires_run)
         return self._ask()
 
     def _ask(self, context: str | None = None) -> AgentResult:
@@ -60,17 +69,29 @@ class LocalAgent:
         self.messages.append({"role": "assistant", "content": content})
         return AgentResult(content=content, turns=1)
 
-    def _act(self, task: str, intent: str) -> AgentResult:
+    def _route_task(self, task: str) -> RouteDecision:
+        context = f"{ROUTER_PROMPT}\n\nUser request:\n{task}"
+        try:
+            response = self._chat(context, json_mode=True)
+        except OllamaConnectionError:
+            raise
+        content = str(response.get("message", {}).get("content", "")).strip()
+        route = _extract_json_object(content)
+        if not isinstance(route, dict):
+            return RouteDecision(mode="chat", confidence=0.0, reason="Router returned invalid JSON.")
+        return _validate_route(route)
+
+    def _act(self, task: str, intent: str, requires_run: bool = False) -> AgentResult:
         observations: list[dict[str, Any]] = []
 
         for step in range(1, self.config.max_steps + 1):
-            action = self._forced_action(task, intent, observations)
+            action = self._forced_action(intent, requires_run, observations)
             if action is None:
                 action = self._next_action(task, intent, observations)
 
             kind = str(action.get("action", "")).strip()
             if kind in {"answer", "finish"}:
-                forced = self._forced_action(task, intent, observations)
+                forced = self._forced_action(intent, requires_run, observations)
                 if forced is not None:
                     action = forced
                     kind = str(action.get("action", "")).strip()
@@ -81,7 +102,7 @@ class LocalAgent:
                     return AgentResult(content=reply, turns=step)
 
             if _is_repeated_write(action, observations):
-                forced = self._forced_action(task, intent, observations)
+                forced = self._forced_action(intent, requires_run, observations)
                 if forced is not None:
                     action = forced
                 else:
@@ -117,7 +138,7 @@ class LocalAgent:
             )
             if result.get("ok") and result.get("path"):
                 self.last_written_file = str(result["path"])
-            if _should_stop_after_success(task, intent, observations):
+            if _should_stop_after_success(intent, requires_run, observations):
                 reply = _format_final_reply("Completed and verified successfully.", observations)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
@@ -158,8 +179,8 @@ class LocalAgent:
             "message": "I could not get a valid local action from the model after retrying the action protocol.",
         }
 
-    def _forced_action(self, task: str, intent: str, observations: list[dict[str, Any]]) -> dict[str, Any] | None:
-        if intent != "edit" or not _requests_run(task):
+    def _forced_action(self, intent: str, requires_run: bool, observations: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if intent != "edit" or not requires_run:
             return None
         if not self.last_written_file or not self.last_written_file.endswith(".py"):
             return None
@@ -167,7 +188,7 @@ class LocalAgent:
             return None
         return {
             "action": "run_shell",
-            "command": f"python3 {shlex.quote(self.last_written_file)}",
+            "command": _python_run_command_for_path(self.last_written_file),
             "timeout_seconds": 120,
         }
 
@@ -235,6 +256,10 @@ class LocalAgent:
         return f"python3 {path}" if self.last_written_file.endswith(".py") else path
 
     def _workspace_context(self, task: str) -> str:
+        context, _ = self._workspace_context_and_files(task)
+        return context
+
+    def _workspace_context_and_files(self, task: str) -> tuple[str, list[str]]:
         listing = self.tools.list_files(max_depth=3, limit=120)
         files = listing.get("files", []) if listing.get("ok") else []
         selected = _select_context_files(task, files)
@@ -243,7 +268,7 @@ class LocalAgent:
             result = self.tools.read_file(path, max_lines=160)
             if result.get("ok"):
                 parts.append(f"File: {path}\n{result['content']}")
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), [str(path) for path in files]
 
     def _action_context(
         self,
@@ -252,9 +277,12 @@ class LocalAgent:
         observations: list[dict[str, Any]],
         protocol_error: str | None = None,
     ) -> str:
+        workspace_context, workspace_files = self._workspace_context_and_files(task)
+        skills = format_coding_skills(select_coding_skills(task, intent, workspace_files, observations))
         parts = [
-            self._workspace_context(task),
+            workspace_context,
             f"Request intent: {intent}",
+            skills,
             ACTION_PROMPT,
         ]
         if intent == "read":
@@ -321,6 +349,30 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def _validate_route(route: dict[str, Any]) -> RouteDecision:
+    mode = str(route.get("mode", "chat")).strip().lower()
+    allowed = {"chat", "read", "edit", "shell", "hardware"}
+    if mode not in allowed:
+        return RouteDecision(mode="chat", confidence=0.0, reason=f"Unknown route mode: {mode}")
+
+    try:
+        confidence = float(route.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(confidence, 1.0))
+    reason = str(route.get("reason", "")).strip()
+    requires_run = _bool_value(route.get("requires_run", False))
+
+    if confidence < 0.70 and mode in {"edit", "shell"}:
+        return RouteDecision(
+            mode="chat",
+            requires_run=False,
+            confidence=confidence,
+            reason=reason or "Low-confidence action route downgraded to chat.",
+        )
+    return RouteDecision(mode=mode, requires_run=requires_run, confidence=confidence, reason=reason)
 
 
 def _validate_action(action: dict[str, Any], intent: str, observations: list[dict[str, Any]]) -> str | None:
@@ -464,10 +516,6 @@ def _is_repeated_write(action: dict[str, Any], observations: list[dict[str, Any]
     return any(observation.get("signature") == signature for observation in observations)
 
 
-def _requests_run(task: str) -> bool:
-    return any(re.search(rf"\b{word}\b", task, re.IGNORECASE) for word in {"check", "run", "test", "verify"})
-
-
 def _last_action_step(observations: list[dict[str, Any]], action_name: str) -> int:
     return max(
         (
@@ -496,8 +544,8 @@ def _should_stop_after_failure(result: dict[str, Any]) -> bool:
     return "declined" in error or "blocked" in error or "escapes workspace" in error
 
 
-def _should_stop_after_success(task: str, intent: str, observations: list[dict[str, Any]]) -> bool:
-    if intent != "edit" or not _requests_run(task) or not observations:
+def _should_stop_after_success(intent: str, requires_run: bool, observations: list[dict[str, Any]]) -> bool:
+    if intent != "edit" or not requires_run or not observations:
         return False
     latest = observations[-1]
     if latest.get("action", {}).get("action") != "run_shell":
@@ -514,6 +562,13 @@ def _bool_value(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _python_run_command_for_path(path: str) -> str:
+    file_path = Path(path)
+    if len(file_path.parts) >= 2 and file_path.parts[0] == "tests" and file_path.name.startswith("test_"):
+        return f"python3 -m unittest discover -s tests -p {shlex.quote(file_path.name)}"
+    return f"python3 {shlex.quote(path)}"
 
 
 def _format_final_reply(reply: str, observations: list[dict[str, Any]]) -> str:
