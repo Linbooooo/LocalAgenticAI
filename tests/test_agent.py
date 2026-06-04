@@ -930,6 +930,47 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(result.content.strip(), "hello world")
 
+    def test_test_it_uses_last_written_file_without_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello_world.py").write_text("print('Hello, World!')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.last_written_file = "hello_world.py"
+            agent.client.chat = Mock()
+
+            result = agent.run("test it.")
+
+            self.assertEqual(result.content.strip(), "Hello, World!")
+            agent.client.chat.assert_not_called()
+
+    def test_shell_action_stops_after_successful_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello_world.py").write_text("print('Hello, World!')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("shell", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "run_shell",
+                                    "command": "python3 hello_world.py",
+                                    "stdin": "",
+                                    "timeout_seconds": 120,
+                                }
+                            ),
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("test hello_world.py")
+
+            self.assertIn("Completed and verified successfully.", result.content)
+            self.assertIn("Hello, World!", result.content)
+            self.assertEqual(agent.client.chat.call_count, 2)
+
     def test_write_tests_and_run_it_does_not_bypass_action_loop(self):
         with tempfile.TemporaryDirectory() as directory:
             source_dir = Path(directory, "local_agent_demo")

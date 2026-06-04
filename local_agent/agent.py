@@ -437,9 +437,11 @@ class LocalAgent:
 
     def _followup_run_command(self, task: str) -> str | None:
         text = task.lower()
-        if "run" not in text or not self.last_written_file:
+        if not self.last_written_file:
             return None
-        if _looks_like_edit_or_test_creation_request(text):
+        if not re.search(r"\b(run|test|check|verify|execute)\b", text):
+            return None
+        if _looks_like_new_local_work_request(text):
             return None
         if "file" not in text and "script" not in text and "it" not in text:
             return None
@@ -587,6 +589,30 @@ def _looks_like_edit_or_test_creation_request(text: str) -> bool:
             "generate",
             "test",
             "tests",
+            "case",
+            "cases",
+            "unittest",
+            "pytest",
+        }
+    )
+
+
+def _looks_like_new_local_work_request(text: str) -> bool:
+    return any(
+        re.search(rf"\b{word}\b", text)
+        for word in {
+            "write",
+            "create",
+            "add",
+            "modify",
+            "update",
+            "fix",
+            "debug",
+            "repair",
+            "implement",
+            "solve",
+            "solves",
+            "generate",
             "case",
             "cases",
             "unittest",
@@ -1321,7 +1347,7 @@ def _drop_latest_user_message(messages: list[dict[str, Any]], task: str) -> None
 
 
 def _should_stop_after_success(intent: str, criteria: CompletionCriteria, observations: list[dict[str, Any]]) -> bool:
-    if intent != "edit" or not criteria.requires_run or not observations:
+    if intent not in {"edit", "shell"} or not criteria.requires_run or not observations:
         return False
     latest = observations[-1]
     if latest.get("action", {}).get("action") != "run_shell":
