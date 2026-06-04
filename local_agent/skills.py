@@ -50,6 +50,7 @@ DEBUGGING_SKILL = CodingSkill(
     instructions=(
         "Treat command output and tracebacks as ground truth.",
         "Classify the failure before editing: import/path problem, runtime exception, assertion failure, command/tool problem, or bad expected test data.",
+        "For assertion failures, compare the failing input, expected value, and actual value; fix bad expected data when the implementation is already consistent with the problem statement.",
         "Fix one likely root cause, then rerun the narrowest relevant command.",
         "Do not claim success until a verification command succeeds.",
     ),
@@ -61,6 +62,7 @@ ALGORITHM_VERIFICATION_SKILL = CodingSkill(
     instructions=(
         "For algorithm tasks, include edge cases such as duplicates, empty inputs, singletons, no-solution cases, and boundary values when relevant.",
         "When feasible, create a small brute-force oracle or hand-verified expected values instead of guessing expected output.",
+        "For returned-index problems, verify expected indices are valid, distinct when required, and point to values satisfying the target condition.",
         "For order-insensitive outputs, normalize before comparing.",
         "If multiple answers are valid, test validity properties rather than one arbitrary ordering.",
     ),

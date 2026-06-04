@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from local_agent.config import AgentConfig
 from local_agent.tools import WorkspaceTools
@@ -8,6 +9,12 @@ from local_agent.tools import WorkspaceTools
 
 def make_tools(workspace: Path) -> WorkspaceTools:
     config = AgentConfig(workspace=workspace, trust="auto")
+    config.finalize()
+    return WorkspaceTools(config)
+
+
+def make_prompting_tools(workspace: Path) -> WorkspaceTools:
+    config = AgentConfig(workspace=workspace, trust="ask")
     config.finalize()
     return WorkspaceTools(config)
 
@@ -39,6 +46,24 @@ class ToolTests(unittest.TestCase):
             result = tools.run_shell("python hello_world.py", timeout_seconds=10)
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["stdout"].strip(), "hello world")
+
+    def test_shell_can_pass_stdin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "echo_input.py").write_text("value = input()\nprint(f'got {value}')\n", encoding="utf-8")
+            tools = make_tools(Path(directory))
+            result = tools.run_shell("python3 echo_input.py", timeout_seconds=10, stdin="hello\n")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["stdout"].strip(), "got hello")
+
+    def test_confirm_accepts_repeated_y_typo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools = make_prompting_tools(Path(directory))
+
+            with patch("builtins.input", return_value="yy"):
+                result = tools.write_file("hello.py", "print('hello')\n")
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), "print('hello')\n")
 
     def test_shell_runs_test_files_with_unittest_discovery(self):
         with tempfile.TemporaryDirectory() as directory:

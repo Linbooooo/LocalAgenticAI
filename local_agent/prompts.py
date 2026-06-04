@@ -19,7 +19,7 @@ Return exactly one JSON object with no markdown:
 Mode meanings:
 - chat: ordinary conversation, explanation, brainstorming, or no workspace action needed.
 - read: inspect, search, explain, summarize, or display local workspace content without changing files or running commands.
-- edit: create, modify, delete, fix, refactor, or generate files. Use requires_run=true when the user also asks to run, test, check, or verify.
+- edit: create, modify, delete, fix, refactor, or generate files. Use requires_run=true when the user also asks to run, test, check, verify, display output, or show results.
 - shell: run a local command or start/check/build/test something without file edits.
 - hardware: answer using local CPU/GPU/RAM/Ollama status.
 
@@ -37,16 +37,17 @@ Allowed actions:
 {"action":"search_text","pattern":"text or regex","path":"relative/path","file_glob":"*","case_sensitive":false}
 {"action":"write_file","path":"relative/path","content":"full file content"}
 {"action":"replace_in_file","path":"relative/path","old":"exact old text","new":"replacement text","max_replacements":1}
-{"action":"run_shell","command":"local shell command","timeout_seconds":120}
+{"action":"run_shell","command":"local shell command","timeout_seconds":120,"stdin":"optional input text"}
 {"action":"finish","message":"final answer to the user"}
 {"action":"answer","message":"ask a brief clarifying question if the request cannot be done safely"}
 
 Rules:
 - Choose exactly one next action.
 - Continue working until the user's request is complete, then use finish.
-- If the user asks to run, test, check, or verify the result, do not claim success until a run_shell action has produced real output.
+- If the user asks to run, test, check, verify, display output, or show results, do not claim success until a run_shell action has produced the requested evidence.
 - Prefer python3 over python for Python commands.
 - Run unittest files under tests/test_*.py with python3 -m unittest discover -s tests -p <filename>.
+- Shell commands are non-interactive. If a program reads from input(), provide stdin in run_shell or edit the file to include a deterministic demo/test entry point.
 - Commands must be local workspace commands.
 - Use read_file, list_files, or search_text when more local context is needed.
 - Base finish messages only on previous action results. Do not invent prior state or test results.

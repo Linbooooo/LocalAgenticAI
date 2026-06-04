@@ -119,12 +119,15 @@ class WorkspaceTools:
             "replacements": min(count, max_replacements),
         }
 
-    def run_shell(self, command: str, timeout_seconds: int = 120) -> dict[str, Any]:
+    def run_shell(self, command: str, timeout_seconds: int = 120, stdin: str | None = None) -> dict[str, Any]:
         command = _normalize_shell_command(command)
         blocked = _blocked_command_reason(command, allow_network=self.config.allow_network_tools)
         if blocked:
             return {"ok": False, "error": blocked}
-        if not self._confirm("run_shell", {"command": command, "timeout_seconds": timeout_seconds}):
+        preview = {"command": command, "timeout_seconds": timeout_seconds}
+        if stdin is not None:
+            preview["stdin_bytes"] = len(stdin.encode("utf-8"))
+        if not self._confirm("run_shell", preview):
             return {"ok": False, "error": "User declined tool execution."}
 
         try:
@@ -133,6 +136,7 @@ class WorkspaceTools:
                 shell=True,
                 cwd=self.config.workspace,
                 capture_output=True,
+                input=stdin,
                 text=True,
                 timeout=timeout_seconds,
                 executable="/bin/bash" if os.name == "posix" else None,
@@ -170,7 +174,7 @@ class WorkspaceTools:
             return True
         preview = " ".join(f"{key}={value!r}" for key, value in arguments.items())
         answer = input(f"Allow {name} {preview}? [y/N] ").strip().lower()
-        return answer in {"y", "yes"}
+        return answer == "yes" or bool(re.fullmatch(r"y+", answer))
 
 
 def _iter_text_files(root: Path, workspace: Path, file_glob: str):
