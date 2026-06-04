@@ -18,24 +18,28 @@ flowchart TD
     H --> G
 
     I --> J["Build action context"]
-    J --> K["Workspace snapshot"]
-    J --> L["Selected coding skills"]
-    J --> M["Previous action observations"]
+    J --> K["Current user request"]
+    J --> L["Workspace snapshot"]
+    J --> M["Structured agent state"]
+    J --> N["Selected coding skills"]
+    J --> O["Current-task observations"]
 
-    K --> N["LLM chooses one JSON action"]
-    L --> N
-    M --> N
+    K --> P["LLM chooses one JSON action"]
+    L --> P
+    M --> P
+    N --> P
+    O --> P
 
-    N --> O["Validate action protocol"]
-    O -->|invalid| P["Retry with protocol correction"]
-    P --> N
+    P --> Q["Validate action protocol"]
+    Q -->|invalid| R["Retry with protocol correction"]
+    R --> P
 
-    O -->|valid| Q["Execute local tool"]
-    Q --> R["Record observation"]
+    Q -->|valid| S["Execute local tool"]
+    S --> T["Record observation"]
 
-    R --> S{"Done?"}
-    S -->|needs more work| J
-    S -->|verified or finished| T["Final response"]
+    T --> U{"Done?"}
+    U -->|needs more work| J
+    U -->|verified or finished| V["Final response"]
 ```
 
 ## Core Idea
@@ -58,11 +62,30 @@ The result is a coding assistant that can inspect files, edit code, run local co
 2. `LocalAgent` checks for an exact direct command such as `execute "nvidia-smi"`.
 3. Otherwise, the model classifies the request as `chat`, `read`, `edit`, `shell`, or `hardware`.
 4. The deterministic harness validates the route and downgrades risky low-confidence action routes to chat.
-5. For action routes, the agent builds a context packet from workspace files, selected coding skills, and previous observations.
+5. For action routes, the agent builds a self-contained context packet from the current request, workspace files, structured agent state, selected coding skills, completion requirements, and observations from the current task.
 6. The model returns exactly one JSON action.
 7. The harness validates the action protocol and tool permissions.
 8. A local tool runs, and the result is recorded as an observation.
 9. The loop continues until the task is complete, verification succeeds, safety blocks the action, or the step limit is reached.
+
+Validation is not just JSON shape checking. The harness also rejects repeated failed command proposals, repeated identical rewrites, missing test directories for unittest discovery, Python script runs that cannot produce requested output, and success claims that lack required run/test evidence.
+
+## Protocol Isolation
+
+Normal chat can use conversation history. Tool planning should not depend on prior assistant prose.
+
+Route and action calls therefore use isolated protocol messages. The protocol prompt explicitly includes:
+
+```text
+current user request
+workspace snapshot
+structured agent state
+completion requirements
+selected coding skills
+current-task observations
+```
+
+Structured state carries compact references such as the last written file and last shell result. This lets the model resolve follow-ups like "test it" while avoiding a common failure mode where a previous successful command result pollutes the next JSON action decision.
 
 ## Tools Versus Skills
 
@@ -89,3 +112,5 @@ algorithm-verification
 ```
 
 For example, `python-testing` does not run tests by itself. It reminds the model to use the correct project-root command for unittest files, while the existing shell tool and safety policy still control execution.
+
+The same separation applies to repair work. `debugging` and `algorithm-verification` tell the model how to interpret failures, while `LocalAgent` decides whether the proposed next action is admissible and whether the loop has enough evidence to finish.

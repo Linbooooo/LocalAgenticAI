@@ -5,7 +5,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import AgentConfig
@@ -56,6 +56,8 @@ class LocalAgent:
             {"role": "system", "content": SYSTEM_PROMPT.format(workspace=str(config.workspace))}
         ]
         self.last_written_file: str | None = None
+        self.last_shell_command: str | None = None
+        self.last_shell_result: dict[str, Any] | None = None
 
     def run(self, task: str) -> AgentResult:
         self.messages.append({"role": "user", "content": task})
@@ -64,7 +66,7 @@ class LocalAgent:
         if read_path:
             return self._read_file(read_path)
 
-        command = extract_direct_shell_command(task) or self._followup_run_command(task)
+        command = extract_direct_shell_command(task)
         if command:
             return self._run_shell(command)
 
@@ -90,7 +92,7 @@ class LocalAgent:
     def _route_task(self, task: str) -> RouteDecision:
         context = f"{ROUTER_PROMPT}\n\nUser request:\n{task}"
         try:
-            response = self._chat(context, json_mode=True)
+            response = self._protocol_chat(context, json_mode=True)
         except OllamaConnectionError:
             raise
         content = str(response.get("message", {}).get("content", "")).strip()
@@ -172,6 +174,7 @@ class LocalAgent:
                 else:
                     result = {
                         "ok": False,
+                        "blocked": True,
                         "error": (
                             "Repeated run_shell command cannot satisfy the requested output. "
                             "Edit the file to print results, create/run tests, or run a different command that displays results."
@@ -190,6 +193,29 @@ class LocalAgent:
                         self.messages.append({"role": "assistant", "content": reply})
                         return AgentResult(content=reply, turns=step)
                     continue
+
+            if _is_repeated_failed_run(action, observations):
+                result = {
+                    "ok": False,
+                    "blocked": True,
+                    "error": (
+                        "Repeated run_shell command already failed after the latest edit. "
+                        "Inspect the failure or change the file before running the same command again."
+                    ),
+                }
+                observations.append(
+                    {
+                        "step": step,
+                        "action": _public_action(action),
+                        "signature": _action_signature(action),
+                        "result": result,
+                    }
+                )
+                if _should_stop_after_repair_stall(criteria, observations):
+                    reply = _format_repair_stall_reply(observations)
+                    self.messages.append({"role": "assistant", "content": reply})
+                    return AgentResult(content=reply, turns=step)
+                continue
 
             kind = str(action.get("action", "")).strip()
             if kind in {"answer", "finish"}:
@@ -223,6 +249,9 @@ class LocalAgent:
             )
             if result.get("ok") and result.get("path"):
                 self.last_written_file = str(result["path"])
+            if action.get("action") == "run_shell":
+                self.last_shell_command = str(action.get("command", "")).strip()
+                self.last_shell_result = result
             if _should_stop_after_simple_edit(task, intent, criteria, observations):
                 reply = _format_final_reply(_simple_edit_reply(observations[-1]), observations)
                 self.messages.append({"role": "assistant", "content": reply})
@@ -255,10 +284,10 @@ class LocalAgent:
         last_content = ""
 
         for _ in range(self.ACTION_REPAIR_ATTEMPTS + 1):
-            response = self._chat(
+            response = self._protocol_chat(
                 self._action_context(task, intent, criteria, observations, protocol_error, task_spec),
                 json_mode=True,
-                json_temperature=self.config.temperature if _has_failed_observation(observations) else 0.0,
+                json_temperature=0.0,
             )
             last_content = str(response.get("message", {}).get("content", "")).strip()
             action = _extract_json_object(last_content)
@@ -324,7 +353,7 @@ class LocalAgent:
             return None
         command = _python_run_command_for_path(self.last_written_file)
         failed_command = str(_last_failed_run_after_latest_change(observations).get("action", {}).get("command", "")).strip()
-        if failed_command == command:
+        if _command_signature(failed_command) == _command_signature(command):
             return None
         if _has_run_command_after_step(command, failed_step, observations):
             return None
@@ -411,6 +440,8 @@ class LocalAgent:
 
     def _run_shell(self, command: str) -> AgentResult:
         result = self.tools.run_shell(command)
+        self.last_shell_command = command
+        self.last_shell_result = result
         self.messages.append({"role": "assistant", "content": _format_shell_result(result)})
         return AgentResult(content=_format_shell_result(result), turns=1)
 
@@ -434,19 +465,6 @@ class LocalAgent:
         if self.last_written_file:
             return self.last_written_file
         return None
-
-    def _followup_run_command(self, task: str) -> str | None:
-        text = task.lower()
-        if not self.last_written_file:
-            return None
-        if not re.search(r"\b(run|test|check|verify|execute)\b", text):
-            return None
-        if _looks_like_new_local_work_request(text):
-            return None
-        if "file" not in text and "script" not in text and "it" not in text:
-            return None
-        path = shlex.quote(self.last_written_file)
-        return f"python3 {path}" if self.last_written_file.endswith(".py") else path
 
     def _workspace_context(self, task: str) -> str:
         context, _ = self._workspace_context_and_files(task)
@@ -476,7 +494,9 @@ class LocalAgent:
         skills = format_coding_skills(select_coding_skills(task, intent, workspace_files, observations))
         parts = [
             workspace_context,
+            f"User request:\n{task}",
             f"Request intent: {intent}",
+            _format_agent_state(self),
             _format_completion_criteria(criteria),
             _format_task_spec(task_spec),
             skills,
@@ -506,6 +526,25 @@ class LocalAgent:
         json_temperature: float | None = None,
     ) -> dict[str, Any]:
         messages = self._messages_with_context(context)
+        return self._send_chat(messages, json_mode=json_mode, json_temperature=json_temperature)
+
+    def _protocol_chat(
+        self,
+        context: str,
+        *,
+        json_mode: bool = False,
+        json_temperature: float | None = None,
+    ) -> dict[str, Any]:
+        messages = [self.messages[0], {"role": "system", "content": context}]
+        return self._send_chat(messages, json_mode=json_mode, json_temperature=json_temperature)
+
+    def _send_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        json_mode: bool = False,
+        json_temperature: float | None = None,
+    ) -> dict[str, Any]:
         options = self.config.ollama_options()
         if json_mode:
             options = {**options, "temperature": 0.0 if json_temperature is None else json_temperature, "top_p": 1.0}
@@ -589,30 +628,6 @@ def _looks_like_edit_or_test_creation_request(text: str) -> bool:
             "generate",
             "test",
             "tests",
-            "case",
-            "cases",
-            "unittest",
-            "pytest",
-        }
-    )
-
-
-def _looks_like_new_local_work_request(text: str) -> bool:
-    return any(
-        re.search(rf"\b{word}\b", text)
-        for word in {
-            "write",
-            "create",
-            "add",
-            "modify",
-            "update",
-            "fix",
-            "debug",
-            "repair",
-            "implement",
-            "solve",
-            "solves",
-            "generate",
             "case",
             "cases",
             "unittest",
@@ -779,6 +794,8 @@ def _format_repair_guidance(criteria: CompletionCriteria, observations: list[dic
         "- Do not answer or finish yet.",
         "- Choose a corrective local action: read_file, replace_in_file, write_file, or run_shell.",
         "- Use the traceback/output as ground truth. If the command failed due missing CLI arguments, rerun with representative arguments or edit the file to include a demo/test entry point.",
+        "- For assertion failures in generated algorithm tests, audit the test with a brute-force oracle or validity helper before changing expected constants.",
+        "- For returned-index problems, repair tests to check index validity and target satisfaction when multiple index orders or answers are possible.",
         "- Shell commands are non-interactive. If the program reads input(), pass stdin in run_shell or edit the code to avoid interactive input during verification.",
     ]
     if output:
@@ -836,6 +853,7 @@ def _successful_runs_after_latest_change(observations: list[dict[str, Any]]) -> 
         for observation in observations
         if int(observation.get("step", 0)) > change_step
         and observation.get("action", {}).get("action") == "run_shell"
+        and _is_executed_shell_observation(observation)
         and observation.get("result", {}).get("ok")
     ]
 
@@ -847,6 +865,7 @@ def _last_failed_run_after_latest_change(observations: list[dict[str, Any]]) -> 
         for observation in observations
         if int(observation.get("step", 0)) > change_step
         and observation.get("action", {}).get("action") == "run_shell"
+        and _is_executed_shell_observation(observation)
         and not observation.get("result", {}).get("ok")
     ]
     return failed_runs[-1] if failed_runs else {}
@@ -874,6 +893,13 @@ def _has_test_evidence(observation: dict[str, Any]) -> bool:
         or re.search(r"\btest\s+cases?\s+\d+\s+passed\b", output)
         or re.search(r"\bok\b", output)
     )
+
+
+def _is_executed_shell_observation(observation: dict[str, Any]) -> bool:
+    if observation.get("action", {}).get("action") != "run_shell":
+        return False
+    result = observation.get("result", {})
+    return any(key in result for key in {"returncode", "stdout", "stderr"})
 
 
 def _has_passing_test_evidence(observation: dict[str, Any]) -> bool:
@@ -956,6 +982,16 @@ def _validate_action(
                 "This run_shell command cannot satisfy the requested visible output because the target Python "
                 "file has no print/test/stdout entry point. Edit the file to display results, create tests, "
                 "or run a different command that produces output."
+            )
+        if _is_repeated_failed_run(action, observations):
+            return (
+                "This run_shell command already failed after the latest edit. Inspect the failure, change the file, "
+                "or run a different verification command before trying the same command again."
+            )
+        if _is_repeated_unproductive_run(action, criteria, observations):
+            return (
+                "This run_shell command already ran after the latest edit without producing the requested output. "
+                "Edit the file to print results, create tests, or run a command that displays evidence."
             )
     elif kind == "read_file" and not str(action.get("path", "")).strip():
         return "read_file requires a non-empty path."
@@ -1226,6 +1262,21 @@ def _format_json(title: str, value: Any) -> str:
     return f"{title}:\n{json.dumps(value, indent=2, ensure_ascii=False)}"
 
 
+def _format_agent_state(agent: LocalAgent) -> str:
+    state: dict[str, Any] = {
+        "last_written_file": agent.last_written_file,
+        "last_shell_command": agent.last_shell_command,
+    }
+    if agent.last_shell_result is not None:
+        state["last_shell_result"] = {
+            "ok": agent.last_shell_result.get("ok"),
+            "returncode": agent.last_shell_result.get("returncode"),
+            "stdout": _truncate(str(agent.last_shell_result.get("stdout", "")), 500),
+            "stderr": _truncate(str(agent.last_shell_result.get("stderr", "")), 500),
+        }
+    return _format_json("Agent state", state)
+
+
 def _public_action(action: dict[str, Any]) -> dict[str, Any]:
     public = {key: value for key, value in action.items() if key not in {"content", "stdin"}}
     if "content" in action:
@@ -1244,6 +1295,8 @@ def _action_signature(action: dict[str, Any]) -> str:
         old_hash = hashlib.sha256(str(action.get("old", "")).encode("utf-8")).hexdigest()
         new_hash = hashlib.sha256(str(action.get("new", "")).encode("utf-8")).hexdigest()
         return f"replace_in_file:{action.get('path', '')}:{old_hash}:{new_hash}"
+    if kind == "run_shell":
+        return f"run_shell:{_command_signature(str(action.get('command', '')))}"
     return json.dumps(_public_action(action), sort_keys=True, ensure_ascii=False)
 
 
@@ -1261,7 +1314,7 @@ def _is_repeated_unproductive_run(
 ) -> bool:
     if action.get("action") != "run_shell" or not criteria.requires_output:
         return False
-    command = str(action.get("command", "")).strip()
+    command = _command_signature(str(action.get("command", "")))
     if not command:
         return False
     latest_change_step = _last_successful_change_step(observations)
@@ -1270,11 +1323,30 @@ def _is_repeated_unproductive_run(
             continue
         if observation.get("action", {}).get("action") != "run_shell":
             continue
-        if str(observation.get("action", {}).get("command", "")).strip() != command:
+        if _command_signature(str(observation.get("action", {}).get("command", ""))) != command:
+            continue
+        if not _is_executed_shell_observation(observation):
             continue
         if observation.get("result", {}).get("ok") and not _has_meaningful_shell_output(observation):
             return True
     return False
+
+
+def _is_repeated_failed_run(action: dict[str, Any], observations: list[dict[str, Any]]) -> bool:
+    if action.get("action") != "run_shell":
+        return False
+    command = _command_signature(str(action.get("command", "")))
+    if not command:
+        return False
+    latest_change_step = _last_successful_change_step(observations)
+    return any(
+        int(observation.get("step", 0)) > latest_change_step
+        and observation.get("action", {}).get("action") == "run_shell"
+        and _command_signature(str(observation.get("action", {}).get("command", ""))) == command
+        and _is_executed_shell_observation(observation)
+        and not observation.get("result", {}).get("ok")
+        for observation in observations
+    )
 
 
 def _last_action_step(observations: list[dict[str, Any]], action_name: str) -> int:
@@ -1289,12 +1361,34 @@ def _last_action_step(observations: list[dict[str, Any]], action_name: str) -> i
 
 
 def _has_run_command_after_step(command: str, step: int, observations: list[dict[str, Any]]) -> bool:
+    signature = _command_signature(command)
     return any(
         int(observation.get("step", 0)) > step
         and observation.get("action", {}).get("action") == "run_shell"
-        and str(observation.get("action", {}).get("command", "")).strip() == command
+        and _command_signature(str(observation.get("action", {}).get("command", ""))) == signature
+        and _is_executed_shell_observation(observation)
         for observation in observations
     )
+
+
+def _command_signature(command: str) -> str:
+    command = command.strip()
+    if not command:
+        return ""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return " ".join(command.split())
+    if not tokens:
+        return ""
+    if Path(tokens[0]).name in {"python", "python3"}:
+        index = 1
+        while index < len(tokens) and tokens[index] in {"-u"}:
+            index += 1
+        if index < len(tokens) and tokens[index].endswith(".py"):
+            script = str(PurePosixPath(tokens[index]).as_posix()).lstrip("./")
+            return " ".join(["python", script, *tokens[index + 1 :]])
+    return " ".join(tokens)
 
 
 def _last_successful_change_step(observations: list[dict[str, Any]]) -> int:
@@ -1320,7 +1414,7 @@ def _should_stop_after_repair_stall(criteria: CompletionCriteria, observations: 
         and not observation.get("result", {}).get("ok")
         and observation.get("action", {}).get("action") in {"answer", "finish", "write_file", "replace_in_file", "run_shell"}
     ]
-    return len(stalled) >= 5
+    return len(stalled) >= 2
 
 
 def _format_repair_stall_reply(observations: list[dict[str, Any]]) -> str:

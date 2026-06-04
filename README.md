@@ -12,6 +12,8 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - Direct shell command execution for requests like `execute "nvidia-smi"`.
 - Iterative action loop for multi-step work such as editing, running tests, and responding with real output.
 - Model-based semantic routing for chat, read, hardware, shell, and edit tasks.
+- Isolated route/action protocol calls with explicit current request, workspace snapshot, and structured agent state.
+- Deterministic action validation for repeated failed commands, missing test directories, missing stdout entry points, and premature success claims.
 - Lightweight coding skills for project discovery, Python testing, debugging, and algorithm verification.
 - Confirmation prompts for mutating actions unless `--yes` is supplied.
 - Bounded context packing for longer sessions.
@@ -173,8 +175,8 @@ Request flow:
 user request
 -> exact direct command check
 -> model-based semantic route validated by LocalAgent
--> direct local action when appropriate
--> iterative local action loop when work requires multiple steps
+-> isolated action protocol with current request, workspace snapshot, and agent state
+-> iterative local action loop when work requires tools
 -> Ollama chat request when reasoning only is needed
 -> final response
 ```
@@ -198,6 +200,10 @@ Main components:
 
 Routing and action-mode responses go through protocol layers before execution. `LocalAgent` requests JSON-mode route/action output from Ollama, validates required fields, downgrades low-confidence action routes to chat, retries malformed action responses, and can salvage an obvious Python code block into a named file write when the user explicitly asked to create that file.
 
+The normal chat path may use conversation history, but route/action protocol calls are isolated from the prior assistant transcript. The action prompt is self-contained: it includes the current user request, a bounded workspace snapshot, selected coding skills, completion requirements, prior observations from the current task, and structured state such as the last written file and last shell command. This prevents stale outputs from an earlier task from poisoning the next tool decision while still letting the model resolve references like "test it" from agent state.
+
+Repair planning is also validated outside the model. The harness rejects duplicate failed shell commands before rerunning them, blocks repeated identical rewrites, keeps command comparisons normalized across common Python invocation forms, and stops when the model cannot produce a corrective action after a failed verification.
+
 ## Coding Skills
 
 Skills are not extra tools. They are small instruction packs injected into the action prompt when the task and workspace call for them. The model still chooses actions, and the deterministic tool layer still validates and executes those actions.
@@ -207,8 +213,8 @@ Current built-in skills:
 - `coding-change`: inspect relevant code, keep edits scoped, and verify before claiming success.
 - `project-discovery`: infer layout from files such as `pyproject.toml`, `README.md`, `Makefile`, package manifests, and tests.
 - `python-testing`: prefer `python3`, run `tests/test_*.py` through unittest discovery from the workspace root, and avoid import fixes when the issue is direct test-file execution.
-- `debugging`: classify failures from real output, fix one likely root cause, and rerun the narrowest relevant command.
-- `algorithm-verification`: test algorithmic solutions with edge cases, independent expected values, and validity checks when multiple outputs are acceptable.
+- `debugging`: classify failures from real output, compare assertions against the problem or an oracle, fix one likely root cause, and rerun the narrowest relevant command.
+- `algorithm-verification`: test algorithmic solutions with edge cases, independent expected values, returned-index validity checks, and normalization when multiple outputs are acceptable.
 
 This keeps common coding workflows close to the agent without widening the tool permission surface.
 
@@ -251,6 +257,25 @@ Run tests:
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+Run live model evaluation prompts in temporary workspaces:
+
+```bash
+python3 scripts/evaluate_agent.py --suite smoke
+python3 scripts/evaluate_agent.py --suite medium --timeout 300
+python3 scripts/evaluate_agent.py --suite hard --timeout 300
+```
+
+The Makefile exposes the same flows:
+
+```bash
+make test
+make eval-smoke
+make eval-medium
+make eval-hard
+```
+
+Live evals are intentionally model-sensitive. A failed live prompt means the current model plus prompt stack did not solve that task reliably; unit tests still cover the deterministic harness guarantees.
 
 Build the container:
 

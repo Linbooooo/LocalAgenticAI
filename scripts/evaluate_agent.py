@@ -17,11 +17,11 @@ SMOKE_PROMPTS = [
     "write a python file that implements binary search and test it and display output",
     "write a python file that outputs the nth fibonacci number given an input n. test it and display the results.",
     "write a python file that solves 3sum and test it. Display the results.",
-    "write a python file that implements merge sort and include test cases. Run it and show results.",
     "write a python file that checks whether a string is a palindrome and test it. Display results.",
 ]
 
 MEDIUM_PROMPTS = [
+    "write a python file that implements merge sort and include test cases. Run it and show results.",
     "write a python file that implements merge intervals. Include tests for overlapping, touching, nested, unsorted, single interval, and empty inputs. Run it and display results.",
     "write a python file that implements top k frequent words. Break frequency ties lexicographically. Include tests for ties, k=1, k larger than unique words, and repeated words. Run it and display results.",
     "write a python file that implements a MinStack with push, pop, top, and get_min in O(1). Include tests with duplicate minimums, negative values, and pop behavior. Run it and display results.",

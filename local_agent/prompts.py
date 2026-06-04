@@ -50,6 +50,7 @@ Rules:
 - Shell commands are non-interactive. If a program reads from input(), provide stdin in run_shell or edit the file to include a deterministic demo/test entry point.
 - Commands must be local workspace commands.
 - Use read_file, list_files, or search_text when more local context is needed.
+- When tests fail, do not change expected values just to match broken output. Fix the implementation unless independent evidence shows the expectation is wrong.
 - Base finish messages only on previous action results. Do not invent prior state or test results.
 - If no safe action can satisfy the request, return answer.
 """

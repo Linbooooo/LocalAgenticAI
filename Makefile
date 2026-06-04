@@ -1,7 +1,16 @@
-.PHONY: test doctor install docker-build docker-doctor compose-up compose-pull-model compose-chat
+.PHONY: test eval-smoke eval-medium eval-hard doctor install docker-build docker-doctor compose-up compose-pull-model compose-chat
 
 test:
 	python3 -m unittest discover -s tests
+
+eval-smoke:
+	python3 scripts/evaluate_agent.py --suite smoke
+
+eval-medium:
+	python3 scripts/evaluate_agent.py --suite medium --timeout 300
+
+eval-hard:
+	python3 scripts/evaluate_agent.py --suite hard --timeout 300
 
 doctor:
 	python3 -m local_agent doctor
@@ -23,4 +32,3 @@ compose-pull-model:
 
 compose-chat:
 	docker compose run --rm agent chat
-

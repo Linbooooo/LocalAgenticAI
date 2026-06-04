@@ -7,7 +7,9 @@ from unittest.mock import Mock
 from local_agent.agent import (
     CompletionCriteria,
     LocalAgent,
+    _command_signature,
     _completion_missing,
+    _format_repair_guidance,
     _normalize_written_content,
     _task_spec,
     _validate_action,
@@ -308,6 +310,104 @@ class AgentTests(unittest.TestCase):
             self.assertIn("[]", result.content)
             self.assertEqual(result.content.count("$ python3 three_sum.py"), 1)
             self.assertEqual(result.turns, 3)
+
+    def test_repeated_failed_run_is_rejected_without_rerunning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = make_agent(Path(directory))
+            content = "print('starting')\nraise RuntimeError('boom')\n"
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "write_file",
+                                    "path": "broken.py",
+                                    "content": content,
+                                }
+                            ),
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 broken.py","timeout_seconds":120}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 broken.py","timeout_seconds":120}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"answer","message":"No fix."}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"answer","message":"No fix."}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"answer","message":"No fix."}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"answer","message":"No fix."}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"answer","message":"No fix."}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("write broken.py run it and display the result")
+
+            self.assertEqual(result.content.count("RuntimeError: boom"), 1)
+            self.assertIn("Step 3: read_file completed", result.content)
+            self.assertIn("Could not repair the failed verification", result.content)
+
+    def test_repair_guidance_mentions_algorithm_test_oracles(self):
+        observations = [
+            {
+                "step": 1,
+                "action": {"action": "write_file", "path": "two_sum.py"},
+                "result": {"ok": True, "path": "two_sum.py"},
+            },
+            {
+                "step": 2,
+                "action": {"action": "run_shell", "command": "python3 two_sum.py"},
+                "result": {
+                    "ok": False,
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "AssertionError: expected [3, 4], got []",
+                },
+            },
+        ]
+
+        guidance = _format_repair_guidance(CompletionCriteria(requires_run=True), observations)
+
+        self.assertIn("brute-force oracle", guidance)
+        self.assertIn("returned-index problems", guidance)
+
+    def test_python_command_signature_normalizes_equivalent_script_runs(self):
+        self.assertEqual(_command_signature("python3 ./two_sum.py"), _command_signature("python3 -u two_sum.py"))
+        self.assertEqual(_command_signature("python two_sum.py"), "python two_sum.py")
 
     def test_finish_is_rejected_when_completion_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -880,6 +980,39 @@ class AgentTests(unittest.TestCase):
                 any("User declined tool execution." in str(message.get("content", "")) for message in agent.messages)
             )
 
+    def test_action_protocol_does_not_receive_stale_chat_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = make_agent(Path(directory))
+            agent.messages.append({"role": "user", "content": "test hello_world.py"})
+            agent.messages.append(
+                {
+                    "role": "assistant",
+                    "content": "Completed and verified successfully.\n\nCommand results:\n$ python3 hello_world.py\nHello, World!",
+                }
+            )
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"write_file","path":"two_sum.py","content":"print(\\"ok\\")\\n"}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("write a code that solve the 2sum problem and test it and display the results.")
+
+            self.assertIn("ok", result.content)
+            route_messages = agent.client.chat.call_args_list[0].kwargs["messages"]
+            action_messages = agent.client.chat.call_args_list[1].kwargs["messages"]
+            self.assertEqual(len(route_messages), 2)
+            self.assertEqual(len(action_messages), 2)
+            self.assertNotIn("Completed and verified successfully", route_messages[1]["content"])
+            self.assertNotIn("Completed and verified successfully", action_messages[1]["content"])
+            self.assertIn("write a code that solve the 2sum problem", action_messages[1]["content"])
+
     def test_written_content_strips_outer_code_fence(self):
         content = "```python\nprint('ok')\n```"
 
@@ -920,27 +1053,68 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(result.content, "Could you clarify what you want changed?")
             self.assertEqual(list(Path(directory).iterdir()), [])
 
-    def test_run_the_file_uses_last_written_file(self):
+    def test_run_the_file_uses_state_aware_planner(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "hello.py").write_text("print('hello world')\n", encoding="utf-8")
             agent = make_agent(Path(directory))
             agent.last_written_file = "hello.py"
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("shell", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "run_shell",
+                                    "command": "python3 hello.py",
+                                    "timeout_seconds": 120,
+                                }
+                            ),
+                        }
+                    },
+                ]
+            )
 
             result = agent.run("run the file for me")
 
-            self.assertEqual(result.content.strip(), "hello world")
+            self.assertIn("Completed and verified successfully.", result.content)
+            self.assertIn("hello world", result.content)
+            action_context = agent.client.chat.call_args_list[1].kwargs["messages"][1]["content"]
+            self.assertIn("User request:\nrun the file for me", action_context)
+            self.assertIn('"last_written_file": "hello.py"', action_context)
 
-    def test_test_it_uses_last_written_file_without_model(self):
+    def test_test_it_uses_state_aware_planner(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "hello_world.py").write_text("print('Hello, World!')\n", encoding="utf-8")
             agent = make_agent(Path(directory))
             agent.last_written_file = "hello_world.py"
-            agent.client.chat = Mock()
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("shell", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "run_shell",
+                                    "command": "python3 hello_world.py",
+                                    "stdin": "",
+                                    "timeout_seconds": 120,
+                                }
+                            ),
+                        }
+                    },
+                ]
+            )
 
             result = agent.run("test it.")
 
-            self.assertEqual(result.content.strip(), "Hello, World!")
-            agent.client.chat.assert_not_called()
+            self.assertIn("Completed and verified successfully.", result.content)
+            self.assertIn("Hello, World!", result.content)
+            action_context = agent.client.chat.call_args_list[1].kwargs["messages"][1]["content"]
+            self.assertIn("User request:\ntest it.", action_context)
+            self.assertIn('"last_written_file": "hello_world.py"', action_context)
 
     def test_shell_action_stops_after_successful_run(self):
         with tempfile.TemporaryDirectory() as directory:

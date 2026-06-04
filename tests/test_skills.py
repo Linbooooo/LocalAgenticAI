@@ -40,6 +40,15 @@ class SkillTests(unittest.TestCase):
         self.assertIn("python-testing", prompt)
         self.assertIn("unittest discover", prompt)
 
+    def test_algorithm_skill_keeps_expected_values_independent(self):
+        skills = select_coding_skills("write a python file that implements two sum and test it", "edit", [])
+        prompt = format_coding_skills(skills)
+
+        self.assertIn("algorithm-verification", prompt)
+        self.assertIn("validity-check helper or brute-force expected result", prompt)
+        self.assertIn("keep expected values stable during repair", prompt)
+        self.assertIn("independent oracle", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
