@@ -10,6 +10,9 @@ class PolicyTests(unittest.TestCase):
     def test_does_not_extract_prose_shell_request(self):
         self.assertIsNone(extract_direct_shell_command("run the file for me"))
 
+    def test_does_not_extract_plain_filename_as_direct_command(self):
+        self.assertIsNone(extract_direct_shell_command("run hello.py 3 times"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,14 @@ from .context import prepare_messages
 from .ollama_client import OllamaClient, OllamaConnectionError
 from .prompts import ACTION_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
 from .skills import format_coding_skills, select_coding_skills
+from .task_contract import (
+    TaskContract,
+    contract_missing as task_contract_missing,
+    derive_task_contract,
+    format_contract_evidence_for_final,
+    format_contract_missing,
+    format_task_contract,
+)
 from .tool_policy import extract_direct_shell_command
 from .tools import WorkspaceTools
 
@@ -105,13 +113,24 @@ class LocalAgent:
         observations: list[dict[str, Any]] = []
         criteria = _completion_criteria(task, requires_run)
         task_spec = _task_spec(task, intent)
+        if intent == "read":
+            criteria = CompletionCriteria()
+        contract = derive_task_contract(
+            task=task,
+            intent=intent,
+            requires_run=criteria.requires_run,
+            requires_tests=criteria.requires_tests,
+            requires_output=criteria.requires_output,
+            target_path=task_spec.target_path,
+            operation=task_spec.operation,
+        )
 
         for step in range(1, self.config.max_steps + 1):
             action = self._forced_action(intent, criteria, observations)
             if action is None:
                 action = self._repair_recovery_action(criteria, observations)
             if action is None:
-                action = self._next_action(task, intent, criteria, observations, task_spec)
+                action = self._next_action(task, intent, criteria, observations, task_spec, contract)
 
             kind = str(action.get("action", "")).strip()
             if kind in {"answer", "finish"}:
@@ -119,13 +138,13 @@ class LocalAgent:
                 if forced is not None:
                     action = forced
                     kind = str(action.get("action", "")).strip()
-                elif _should_reject_completion_action(kind, criteria, observations):
+                elif _should_reject_completion_action(kind, criteria, observations, contract):
                     recovery = self._repair_recovery_action(criteria, observations)
                     if recovery is not None:
                         action = recovery
                         kind = str(action.get("action", "")).strip()
                     else:
-                        observations.append(_completion_failure_observation(step, action, criteria, observations))
+                        observations.append(_completion_failure_observation(step, action, criteria, observations, contract))
                         if _should_stop_after_repair_stall(criteria, observations):
                             reply = _format_repair_stall_reply(observations)
                             self.messages.append({"role": "assistant", "content": reply})
@@ -133,7 +152,7 @@ class LocalAgent:
                         continue
                 else:
                     reply = str(action.get("message", "")).strip() or _format_observations(observations)
-                    reply = _format_final_reply(reply, observations)
+                    reply = _format_final_reply(reply, observations, contract)
                     self.messages.append({"role": "assistant", "content": reply})
                     return AgentResult(content=reply, turns=step)
 
@@ -219,19 +238,19 @@ class LocalAgent:
 
             kind = str(action.get("action", "")).strip()
             if kind in {"answer", "finish"}:
-                if _should_reject_completion_action(kind, criteria, observations):
+                if _should_reject_completion_action(kind, criteria, observations, contract):
                     recovery = self._repair_recovery_action(criteria, observations)
                     if recovery is not None:
                         action = recovery
                     else:
-                        observations.append(_completion_failure_observation(step, action, criteria, observations))
+                        observations.append(_completion_failure_observation(step, action, criteria, observations, contract))
                         if _should_stop_after_repair_stall(criteria, observations):
                             reply = _format_repair_stall_reply(observations)
                             self.messages.append({"role": "assistant", "content": reply})
                             return AgentResult(content=reply, turns=step)
                         continue
                 reply = str(action.get("message", "")).strip() or _format_observations(observations)
-                reply = _format_final_reply(reply, observations)
+                reply = _format_final_reply(reply, observations, contract)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
 
@@ -252,12 +271,12 @@ class LocalAgent:
             if action.get("action") == "run_shell":
                 self.last_shell_command = str(action.get("command", "")).strip()
                 self.last_shell_result = result
-            if _should_stop_after_simple_edit(task, intent, criteria, observations):
-                reply = _format_final_reply(_simple_edit_reply(observations[-1]), observations)
+            if _should_stop_after_simple_edit(task, intent, criteria, observations, contract):
+                reply = _format_final_reply(_simple_edit_reply(observations[-1]), observations, contract)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
-            if _should_stop_after_success(intent, criteria, observations):
-                reply = _format_final_reply("Completed and verified successfully.", observations)
+            if _should_stop_after_success(intent, criteria, observations, contract):
+                reply = _format_final_reply("Completed and verified successfully.", observations, contract)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
             if not result.get("ok") and _should_stop_after_failure(result):
@@ -279,13 +298,14 @@ class LocalAgent:
         criteria: CompletionCriteria,
         observations: list[dict[str, Any]],
         task_spec: TaskSpec,
+        contract: TaskContract,
     ) -> dict[str, Any]:
         protocol_error: str | None = None
         last_content = ""
 
         for _ in range(self.ACTION_REPAIR_ATTEMPTS + 1):
             response = self._protocol_chat(
-                self._action_context(task, intent, criteria, observations, protocol_error, task_spec),
+                self._action_context(task, intent, criteria, observations, protocol_error, task_spec, contract),
                 json_mode=True,
                 json_temperature=0.0,
             )
@@ -489,6 +509,7 @@ class LocalAgent:
         observations: list[dict[str, Any]],
         protocol_error: str | None = None,
         task_spec: TaskSpec | None = None,
+        contract: TaskContract | None = None,
     ) -> str:
         workspace_context, workspace_files = self._workspace_context_and_files(task)
         skills = format_coding_skills(select_coding_skills(task, intent, workspace_files, observations))
@@ -499,6 +520,7 @@ class LocalAgent:
             _format_agent_state(self),
             _format_completion_criteria(criteria),
             _format_task_spec(task_spec),
+            format_task_contract(contract) if contract is not None else "",
             skills,
             ACTION_PROMPT,
         ]
@@ -516,6 +538,10 @@ class LocalAgent:
         missing = _completion_missing(criteria, observations)
         if missing:
             parts.append(_format_completion_missing(missing))
+        if contract is not None:
+            contract_missing = task_contract_missing(contract, observations)
+            if contract_missing:
+                parts.append(format_contract_missing(contract_missing))
         return "\n\n".join(parts)
 
     def _chat(
@@ -808,8 +834,9 @@ def _completion_failure_observation(
     action: dict[str, Any],
     criteria: CompletionCriteria,
     observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
 ) -> dict[str, Any]:
-    missing = _completion_missing(criteria, observations)
+    missing = _combined_completion_missing(criteria, observations, contract)
     return {
         "step": step,
         "action": _public_action(action),
@@ -822,16 +849,28 @@ def _should_reject_completion_action(
     kind: str,
     criteria: CompletionCriteria,
     observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
 ) -> bool:
     if kind not in {"answer", "finish"}:
         return False
     if _repair_required(criteria, observations):
         return True
-    if not _completion_missing(criteria, observations):
+    if not _combined_completion_missing(criteria, observations, contract):
         return False
     if kind == "finish":
         return True
     return _has_started_local_work(observations)
+
+
+def _combined_completion_missing(
+    criteria: CompletionCriteria,
+    observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
+) -> list[str]:
+    missing = [*_completion_missing(criteria, observations)]
+    if contract is not None:
+        missing.extend(task_contract_missing(contract, observations))
+    return _dedupe_strings(missing)
 
 
 def _has_started_local_work(observations: list[dict[str, Any]]) -> bool:
@@ -1440,15 +1479,21 @@ def _drop_latest_user_message(messages: list[dict[str, Any]], task: str) -> None
         messages.pop()
 
 
-def _should_stop_after_success(intent: str, criteria: CompletionCriteria, observations: list[dict[str, Any]]) -> bool:
-    if intent not in {"edit", "shell"} or not criteria.requires_run or not observations:
+def _should_stop_after_success(
+    intent: str,
+    criteria: CompletionCriteria,
+    observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
+) -> bool:
+    has_execution_obligation = contract.has_obligation("local_execution") if contract is not None else False
+    if intent not in {"edit", "shell"} or not (criteria.requires_run or has_execution_obligation) or not observations:
         return False
     latest = observations[-1]
     if latest.get("action", {}).get("action") != "run_shell":
         return False
     if not latest.get("result", {}).get("ok"):
         return False
-    return not _completion_missing(criteria, observations)
+    return not _combined_completion_missing(criteria, observations, contract)
 
 
 def _should_stop_after_simple_edit(
@@ -1456,8 +1501,11 @@ def _should_stop_after_simple_edit(
     intent: str,
     criteria: CompletionCriteria,
     observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
 ) -> bool:
     if intent != "edit" or criteria.requires_run or not observations:
+        return False
+    if _combined_completion_missing(criteria, observations, contract):
         return False
     if not _looks_like_simple_single_file_edit(task):
         return False
@@ -1524,6 +1572,17 @@ def _bool_value(value: Any) -> bool:
     return bool(value)
 
 
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
 def _python_run_command_for_path(path: str) -> str:
     file_path = Path(path)
     if _is_python_test_file(path):
@@ -1575,21 +1634,30 @@ def _python_file_requires_stdin(path: Path) -> bool:
     return bool(re.search(r"\binput\s*\(", content) or re.search(r"\bsys\.stdin\.", content))
 
 
-def _format_final_reply(reply: str, observations: list[dict[str, Any]]) -> str:
+def _format_final_reply(
+    reply: str,
+    observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
+) -> str:
     shell_results = [
         observation
         for observation in observations
         if observation.get("action", {}).get("action") == "run_shell"
     ]
-    if not shell_results:
+    contract_evidence = format_contract_evidence_for_final(contract, observations) if contract is not None else ""
+    if not shell_results and not contract_evidence:
         return reply
 
-    lines = [reply, "", "Command results:"]
-    for observation in shell_results:
-        action = observation["action"]
-        result = observation["result"]
-        lines.append(f"$ {action.get('command', '')}")
-        lines.append(_format_shell_result(result))
+    lines = [reply]
+    if contract_evidence:
+        lines.extend(["", contract_evidence])
+    if shell_results:
+        lines.extend(["", "Command results:"])
+        for observation in shell_results:
+            action = observation["action"]
+            result = observation["result"]
+            lines.append(f"$ {action.get('command', '')}")
+            lines.append(_format_shell_result(result))
     return "\n".join(line for line in lines if line is not None).strip()
 
 

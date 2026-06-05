@@ -13,6 +13,7 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - Iterative action loop for multi-step work such as editing, running tests, and responding with real output.
 - Model-based semantic routing for chat, read, hardware, shell, and edit tasks.
 - Isolated route/action protocol calls with explicit current request, workspace snapshot, and structured agent state.
+- Task contracts and an evidence ledger for richer completion checks beyond simple run/test/output flags.
 - Deterministic action validation for repeated failed commands, missing test directories, missing stdout entry points, and premature success claims.
 - Lightweight coding skills for project discovery, Python testing, debugging, and algorithm verification.
 - Confirmation prompts for mutating actions unless `--yes` is supplied.
@@ -175,6 +176,7 @@ Request flow:
 user request
 -> exact direct command check
 -> model-based semantic route validated by LocalAgent
+-> task contract inferred from the request and route
 -> isolated action protocol with current request, workspace snapshot, and agent state
 -> iterative local action loop when work requires tools
 -> Ollama chat request when reasoning only is needed
@@ -185,6 +187,7 @@ Main components:
 
 - [local_agent/agent.py](local_agent/agent.py): `LocalAgent`, which implements the control flow, model calls, direct commands, and iterative action handling.
 - [local_agent/skills.py](local_agent/skills.py): compact procedural coding skills selected for relevant action requests.
+- [local_agent/task_contract.py](local_agent/task_contract.py): task obligations, evidence ledger construction, and contract-based finish checks.
 - [local_agent/tool_policy.py](local_agent/tool_policy.py): exact direct-command extractor.
 - [local_agent/tools.py](local_agent/tools.py): workspace file actions, shell execution, hardware profile, and safety checks.
 - [local_agent/context.py](local_agent/context.py): bounded context packing.
@@ -200,7 +203,9 @@ Main components:
 
 Routing and action-mode responses go through protocol layers before execution. `LocalAgent` requests JSON-mode route/action output from Ollama, validates required fields, downgrades low-confidence action routes to chat, retries malformed action responses, and can salvage an obvious Python code block into a named file write when the user explicitly asked to create that file.
 
-The normal chat path may use conversation history, but route/action protocol calls are isolated from the prior assistant transcript. The action prompt is self-contained: it includes the current user request, a bounded workspace snapshot, selected coding skills, completion requirements, prior observations from the current task, and structured state such as the last written file and last shell command. This prevents stale outputs from an earlier task from poisoning the next tool decision while still letting the model resolve references like "test it" from agent state.
+The normal chat path may use conversation history, but route/action protocol calls are isolated from the prior assistant transcript. The action prompt is self-contained: it includes the current user request, a bounded workspace snapshot, selected coding skills, completion requirements, a task contract, prior observations from the current task, and structured state such as the last written file and last shell command. This prevents stale outputs from an earlier task from poisoning the next tool decision while still letting the model resolve references like "test it" from agent state.
+
+The task contract layer infers structured obligations such as workspace changes, discovery, source inspection/reporting, local execution, test evidence, visible output, repeated successful executions, and simple ordering constraints. The harness builds an evidence ledger from actual tool observations and rejects premature `finish`/`answer` actions when required evidence is missing. The older run/test/output completion flags still remain as compatibility guardrails.
 
 Repair planning is also validated outside the model. The harness rejects duplicate failed shell commands before rerunning them, blocks repeated identical rewrites, keeps command comparisons normalized across common Python invocation forms, and stops when the model cannot produce a corrective action after a failed verification.
 

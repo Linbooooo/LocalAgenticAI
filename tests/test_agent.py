@@ -1330,6 +1330,105 @@ class AgentTests(unittest.TestCase):
             self.assertIn("target_path: hello_world.py", context)
             self.assertIn("language: python", context)
 
+    def test_task_contract_requires_requested_number_of_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello.py").write_text("print('hello')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("shell", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 hello.py","timeout_seconds":120}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 hello.py","timeout_seconds":120}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 hello.py","timeout_seconds":120}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("run hello.py 3 times")
+
+            self.assertEqual(result.content.count("$ python3 hello.py"), 3)
+            self.assertEqual(result.turns, 3)
+            self.assertEqual(agent.client.chat.call_count, 4)
+
+    def test_task_contract_reports_read_source_before_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "hello.py").write_text("print('hello from file')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("shell", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"list_files","path":".","max_depth":2,"limit":20}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"read_file","path":"hello.py","start_line":1,"max_lines":200}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 hello.py","timeout_seconds":120}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("scan this directory for python code. If you find it, display the code, and then run the code.")
+
+            self.assertIn("Observed file contents:", result.content)
+            self.assertIn("1: print('hello from file')", result.content)
+            self.assertIn("$ python3 hello.py", result.content)
+            self.assertIn("hello from file", result.content)
+            self.assertEqual(result.turns, 3)
+
+    def test_edit_contract_rejects_finish_after_only_reading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "app.py").write_text("print('old')\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit"),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"read_file","path":"app.py","start_line":1,"max_lines":200}',
+                        }
+                    },
+                    {"message": {"role": "assistant", "content": '{"action":"finish","message":"Done."}'}},
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"replace_in_file","path":"app.py","old":"old","new":"new","max_replacements":1}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("update app.py")
+
+            self.assertEqual(Path(directory, "app.py").read_text(encoding="utf-8"), "print('new')\n")
+            self.assertNotEqual(result.content, "Done.")
+            self.assertIn("Updated `app.py`.", result.content)
+
 
 if __name__ == "__main__":
     unittest.main()

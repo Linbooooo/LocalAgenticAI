@@ -25,4 +25,4 @@ def extract_direct_shell_command(task: str) -> str | None:
 
 def _looks_like_command(first_token: str) -> bool:
     known = {"cat", "docker", "git", "ls", "make", "node", "npm", "nvidia-smi", "python", "python3", "pytest"}
-    return first_token in known or "/" in first_token or "." in first_token or "-" in first_token
+    return first_token in known or "/" in first_token or "-" in first_token
