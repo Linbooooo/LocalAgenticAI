@@ -119,6 +119,17 @@ class WorkspaceTools:
             "replacements": min(count, max_replacements),
         }
 
+    def delete_file(self, path: str) -> dict[str, Any]:
+        if not self._confirm("delete_file", {"path": path}):
+            return {"ok": False, "error": "User declined tool execution."}
+        file_path = self._resolve(path)
+        if not file_path.exists():
+            return {"ok": False, "error": f"Path does not exist: {path}"}
+        if file_path.is_dir():
+            return {"ok": False, "error": f"Path is a directory: {path}"}
+        file_path.unlink()
+        return {"ok": True, "path": str(file_path.relative_to(self.config.workspace))}
+
     def run_shell(self, command: str, timeout_seconds: int = 120, stdin: str | None = None) -> dict[str, Any]:
         command = _normalize_shell_command(command)
         blocked = _blocked_command_reason(command, allow_network=self.config.allow_network_tools)

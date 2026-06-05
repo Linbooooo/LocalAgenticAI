@@ -29,6 +29,44 @@ Safety:
 - Use confidence below 0.70 when the request is ambiguous.
 """
 
+CONTRACT_PROMPT = """Extract a task contract for this local coding assistant request.
+
+Return exactly one JSON object with no markdown:
+{
+  "obligations": [
+    {
+      "id": "short_unique_id",
+      "kind": "workspace_change|workspace_delete|workspace_discovery|source_inspection|source_report|local_execution|test_evidence|visible_output|assistant_response",
+      "description": "what must be true",
+      "required": true,
+      "params": {
+        "target_path": "relative/path.py or null",
+        "command": "exact command if the user gave one or null",
+        "min_successes": 1,
+        "expected_text": "specific user-requested text/result if any"
+      },
+      "evidence": ["observable evidence needed"]
+    }
+  ],
+  "constraints": [
+    {"kind": "before", "first": "earlier_id", "second": "later_id", "description": "ordering requirement"}
+  ]
+}
+
+Rules:
+- Preserve every requested subtask as an obligation. Do not collapse ordered tasks into one generic run.
+- Preserve user ordering with before constraints, especially for requests using "then", "after", "before", or "again".
+- Use workspace_change for create/update/fix/modify/refactor/write steps.
+- Use workspace_delete when the user asks to delete/remove a file.
+- Use local_execution for each distinct requested run/execute step. Use min_successes for repeated runs.
+- Use source_inspection/source_report when the user asks to read, show, display, or include source/file contents.
+- Use assistant_response when the user asks for a conversational answer in addition to local work.
+- Resolve references like "it", "that", "the program", "the file", or "again" from Agent state when possible.
+- If a target is unknown, use null rather than inventing a new file name.
+- Keep paths relative to the workspace. Do not include absolute paths.
+- Include only local workspace work; do not request network activity.
+"""
+
 ACTION_PROMPT = """For this local work request, choose the next action and return exactly one JSON object with no markdown.
 
 Allowed actions:
@@ -37,6 +75,7 @@ Allowed actions:
 {"action":"search_text","pattern":"text or regex","path":"relative/path","file_glob":"*","case_sensitive":false}
 {"action":"write_file","path":"relative/path","content":"full file content"}
 {"action":"replace_in_file","path":"relative/path","old":"exact old text","new":"replacement text","max_replacements":1}
+{"action":"delete_file","path":"relative/path"}
 {"action":"run_shell","command":"local shell command","timeout_seconds":120,"stdin":"optional input text"}
 {"action":"finish","message":"final answer to the user"}
 {"action":"answer","message":"ask a brief clarifying question if the request cannot be done safely"}
@@ -50,6 +89,7 @@ Rules:
 - Shell commands are non-interactive. If a program reads from input(), provide stdin in run_shell or edit the file to include a deterministic demo/test entry point.
 - Commands must be local workspace commands.
 - Use read_file, list_files, or search_text when more local context is needed.
+- Use delete_file only when the user explicitly asked to delete/remove a file.
 - When tests fail, do not change expected values just to match broken output. Fix the implementation unless independent evidence shows the expectation is wrong.
 - Base finish messages only on previous action results. Do not invent prior state or test results.
 - If no safe action can satisfy the request, return answer.

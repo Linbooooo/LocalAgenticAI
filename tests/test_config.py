@@ -41,6 +41,15 @@ class ConfigTests(unittest.TestCase):
         config.finalize()
         self.assertEqual(config.num_ctx, 4096)
 
+    def test_config_validates_contract_mode(self):
+        config = AgentConfig(workspace=Path("."), contract_mode="fallback")
+        config.finalize()
+        self.assertEqual(config.contract_mode, "fallback")
+
+        bad = AgentConfig(workspace=Path("."), contract_mode="maybe")
+        with self.assertRaisesRegex(ValueError, "contract_mode"):
+            bad.finalize()
+
 
 if __name__ == "__main__":
     unittest.main()

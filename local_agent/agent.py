@@ -11,10 +11,11 @@ from typing import Any
 from .config import AgentConfig
 from .context import prepare_messages
 from .ollama_client import OllamaClient, OllamaConnectionError
-from .prompts import ACTION_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
+from .prompts import ACTION_PROMPT, CONTRACT_PROMPT, ROUTER_PROMPT, SYSTEM_PROMPT
 from .skills import format_coding_skills, select_coding_skills
 from .task_contract import (
     TaskContract,
+    contract_from_model_json,
     contract_missing as task_contract_missing,
     derive_task_contract,
     format_contract_evidence_for_final,
@@ -124,6 +125,7 @@ class LocalAgent:
             target_path=task_spec.target_path,
             operation=task_spec.operation,
         )
+        contract = self._contract_task(task, intent, criteria, task_spec, contract)
 
         for step in range(1, self.config.max_steps + 1):
             action = self._forced_action(intent, criteria, observations)
@@ -444,6 +446,13 @@ class LocalAgent:
                 str(action.get("new", "")),
                 int(action.get("max_replacements", 1)),
             )
+        if kind == "delete_file":
+            if intent != "edit":
+                return {"ok": False, "error": "File deletion is only allowed for edit requests."}
+            path = str(action.get("path", "")).strip()
+            if not path:
+                return {"ok": False, "error": "Missing file path."}
+            return self.tools.delete_file(path)
         if kind == "run_shell":
             if intent not in {"edit", "shell"}:
                 return {"ok": False, "error": "Shell commands are only allowed for shell or edit requests."}
@@ -543,6 +552,60 @@ class LocalAgent:
             if contract_missing:
                 parts.append(format_contract_missing(contract_missing))
         return "\n\n".join(parts)
+
+    def _contract_task(
+        self,
+        task: str,
+        intent: str,
+        criteria: CompletionCriteria,
+        task_spec: TaskSpec,
+        fallback: TaskContract,
+    ) -> TaskContract:
+        if self.config.contract_mode == "fallback":
+            return fallback
+
+        listing = self.tools.list_files(max_depth=3, limit=120)
+        parts = [
+            CONTRACT_PROMPT,
+            f"User request:\n{task}",
+            f"Request intent: {intent}",
+            _format_agent_state(self),
+            _format_completion_criteria(criteria),
+            _format_task_spec(task_spec),
+            _format_json("Workspace files", listing),
+            _format_json(
+                "Fallback contract",
+                {
+                    "obligations": [
+                        {
+                            "id": obligation.id,
+                            "kind": obligation.kind,
+                            "description": obligation.description,
+                            "required": obligation.required,
+                            "params": obligation.params,
+                            "evidence": list(obligation.evidence),
+                        }
+                        for obligation in fallback.obligations
+                    ],
+                    "constraints": [
+                        {
+                            "kind": constraint.kind,
+                            "first": constraint.first,
+                            "second": constraint.second,
+                            "description": constraint.description,
+                        }
+                        for constraint in fallback.constraints
+                    ],
+                },
+            ),
+        ]
+        try:
+            response = self._protocol_chat("\n\n".join(parts), json_mode=True, json_temperature=0.0)
+        except OllamaConnectionError:
+            raise
+        content = str(response.get("message", {}).get("content", "")).strip()
+        contract_json = _extract_json_object(content)
+        return contract_from_model_json(contract_json, fallback=fallback)
 
     def _chat(
         self,
@@ -876,7 +939,7 @@ def _combined_completion_missing(
 def _has_started_local_work(observations: list[dict[str, Any]]) -> bool:
     return any(
         observation.get("action", {}).get("action")
-        in {"write_file", "replace_in_file", "run_shell", "read_file", "search_text", "list_files"}
+        in {"write_file", "replace_in_file", "delete_file", "run_shell", "read_file", "search_text", "list_files"}
         for observation in observations
     )
 
@@ -976,6 +1039,7 @@ def _validate_action(
     kind = str(action.get("action", "")).strip()
     allowed = {
         "answer",
+        "delete_file",
         "finish",
         "list_files",
         "read_file",
@@ -1002,6 +1066,11 @@ def _validate_action(
             return "replace_in_file requires non-empty old text."
         if "new" not in action:
             return "replace_in_file requires new text."
+    elif kind == "delete_file":
+        if intent != "edit":
+            return "delete_file is only valid for edit requests."
+        if not str(action.get("path", "")).strip():
+            return "delete_file requires a non-empty path."
     elif kind == "run_shell":
         if intent not in {"edit", "shell"}:
             return "run_shell is only valid for edit or shell requests."
@@ -1485,6 +1554,8 @@ def _should_stop_after_success(
     observations: list[dict[str, Any]],
     contract: TaskContract | None = None,
 ) -> bool:
+    if contract is not None and contract.has_obligation("assistant_response"):
+        return False
     has_execution_obligation = contract.has_obligation("local_execution") if contract is not None else False
     if intent not in {"edit", "shell"} or not (criteria.requires_run or has_execution_obligation) or not observations:
         return False
@@ -1503,6 +1574,8 @@ def _should_stop_after_simple_edit(
     observations: list[dict[str, Any]],
     contract: TaskContract | None = None,
 ) -> bool:
+    if contract is not None and contract.has_obligation("assistant_response"):
+        return False
     if intent != "edit" or criteria.requires_run or not observations:
         return False
     if _combined_completion_missing(criteria, observations, contract):

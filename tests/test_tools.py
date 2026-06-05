@@ -89,6 +89,17 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["matches"][0]["path"], "src/app.py")
 
+    def test_delete_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "old.py")
+            target.write_text("print('old')\n", encoding="utf-8")
+            tools = make_tools(Path(directory))
+
+            result = tools.delete_file("old.py")
+
+            self.assertTrue(result["ok"], result)
+            self.assertFalse(target.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

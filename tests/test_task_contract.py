@@ -1,6 +1,6 @@
 import unittest
 
-from local_agent.task_contract import contract_missing, derive_task_contract, format_contract_evidence_for_final
+from local_agent.task_contract import contract_from_model_json, contract_missing, derive_task_contract, format_contract_evidence_for_final
 
 
 class TaskContractTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class TaskContractTests(unittest.TestCase):
 
         missing = contract_missing(contract, observations)
 
-        self.assertIn("Only 1 of 3 requested successful local executions have been observed.", missing)
+        self.assertTrue(any("Only 1 of 3 requested successful local executions" in item for item in missing))
 
     def test_source_report_uses_read_file_evidence(self):
         contract = derive_task_contract(
@@ -69,6 +69,86 @@ class TaskContractTests(unittest.TestCase):
         )
 
         self.assertFalse(contract.has_obligation("source_report"))
+
+    def test_model_contract_validates_ordered_run_edit_run_delete(self):
+        fallback = derive_task_contract(
+            task="run it, change it, run it again, then delete it",
+            intent="edit",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+            target_path="hello.py",
+            operation="update",
+        )
+        contract = contract_from_model_json(
+            {
+                "obligations": [
+                    {
+                        "id": "run_before",
+                        "kind": "local_execution",
+                        "description": "Run before editing.",
+                        "required": True,
+                        "params": {"target_path": "hello.py"},
+                    },
+                    {
+                        "id": "change",
+                        "kind": "workspace_change",
+                        "description": "Change the file.",
+                        "required": True,
+                        "params": {"target_path": "hello.py"},
+                    },
+                    {
+                        "id": "run_after",
+                        "kind": "local_execution",
+                        "description": "Run after editing.",
+                        "required": True,
+                        "params": {"target_path": "hello.py"},
+                    },
+                    {
+                        "id": "delete",
+                        "kind": "workspace_delete",
+                        "description": "Delete the file.",
+                        "required": True,
+                        "params": {"target_path": "hello.py"},
+                    },
+                ],
+                "constraints": [
+                    {"kind": "before", "first": "run_before", "second": "change"},
+                    {"kind": "before", "first": "change", "second": "run_after"},
+                    {"kind": "before", "first": "run_after", "second": "delete"},
+                ],
+            },
+            fallback=fallback,
+        )
+
+        incomplete = [
+            {
+                "step": 1,
+                "action": {"action": "run_shell", "command": "python3 hello.py"},
+                "result": {"ok": True, "returncode": 0, "stdout": "old\n", "stderr": ""},
+            },
+            {
+                "step": 2,
+                "action": {"action": "replace_in_file", "path": "hello.py"},
+                "result": {"ok": True, "path": "hello.py"},
+            },
+        ]
+        complete = [
+            *incomplete,
+            {
+                "step": 3,
+                "action": {"action": "run_shell", "command": "python3 hello.py"},
+                "result": {"ok": True, "returncode": 0, "stdout": "new\n", "stderr": ""},
+            },
+            {
+                "step": 4,
+                "action": {"action": "delete_file", "path": "hello.py"},
+                "result": {"ok": True, "path": "hello.py"},
+            },
+        ]
+
+        self.assertTrue(contract_missing(contract, incomplete))
+        self.assertEqual(contract_missing(contract, complete), [])
 
 
 if __name__ == "__main__":

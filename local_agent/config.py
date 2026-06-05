@@ -29,6 +29,7 @@ class AgentConfig:
     trust: str = "ask"
     allow_network_tools: bool = False
     max_steps: int = 24
+    contract_mode: str = "model"
 
     @classmethod
     def load(cls, path: Path | None) -> "AgentConfig":
@@ -63,6 +64,7 @@ class AgentConfig:
             "LOCAL_AGENT_OLLAMA_TIMEOUT": ("ollama_timeout", int),
             "LOCAL_AGENT_TRUST": ("trust", str),
             "LOCAL_AGENT_MAX_STEPS": ("max_steps", int),
+            "LOCAL_AGENT_CONTRACT_MODE": ("contract_mode", str),
         }
         for env_name, (field_name, converter) in env_map.items():
             value = os.environ.get(env_name)
@@ -93,6 +95,8 @@ class AgentConfig:
             self.num_ctx = self.min_num_ctx
         if self.max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
+        if self.contract_mode not in {"model", "fallback"}:
+            raise ValueError("contract_mode must be either 'model' or 'fallback'.")
         self.workspace = self.workspace.expanduser().resolve()
         if not self.workspace.exists():
             raise ValueError(f"Workspace does not exist: {self.workspace}")

@@ -18,7 +18,13 @@ from local_agent.config import AgentConfig
 
 
 def make_agent(workspace: Path) -> LocalAgent:
-    config = AgentConfig(workspace=workspace, trust="auto")
+    config = AgentConfig(workspace=workspace, trust="auto", contract_mode="fallback")
+    config.finalize()
+    return LocalAgent(config)
+
+
+def make_model_contract_agent(workspace: Path) -> LocalAgent:
+    config = AgentConfig(workspace=workspace, trust="auto", contract_mode="model")
     config.finalize()
     return LocalAgent(config)
 
@@ -35,6 +41,15 @@ def route_response(mode: str, *, requires_run: bool = False, confidence: float =
                     "reason": "test route",
                 }
             ),
+        }
+    }
+
+
+def contract_response(obligations: list[dict], constraints: list[dict] | None = None):
+    return {
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({"obligations": obligations, "constraints": constraints or []}),
         }
     }
 
@@ -1428,6 +1443,163 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(Path(directory, "app.py").read_text(encoding="utf-8"), "print('new')\n")
             self.assertNotEqual(result.content, "Done.")
             self.assertIn("Updated `app.py`.", result.content)
+
+    def test_model_contract_preserves_ordered_followup_on_previous_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "hello_world.py")
+            path.write_text("print('Hello, world!')\n", encoding="utf-8")
+            agent = make_model_contract_agent(Path(directory))
+            agent.last_written_file = "hello_world.py"
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    contract_response(
+                        [
+                            {
+                                "id": "run_before_change",
+                                "kind": "local_execution",
+                                "description": "Run the existing program before changing it.",
+                                "required": True,
+                                "params": {"target_path": "hello_world.py", "min_successes": 1},
+                                "evidence": ["successful run_shell"],
+                            },
+                            {
+                                "id": "change_printout",
+                                "kind": "workspace_change",
+                                "description": "Change the printout to hello USA in the existing program.",
+                                "required": True,
+                                "params": {"target_path": "hello_world.py", "expected_text": "hello USA"},
+                                "evidence": ["successful replace_in_file"],
+                            },
+                            {
+                                "id": "run_after_change",
+                                "kind": "local_execution",
+                                "description": "Run the changed program.",
+                                "required": True,
+                                "params": {"target_path": "hello_world.py", "min_successes": 1},
+                                "evidence": ["successful run_shell"],
+                            },
+                            {
+                                "id": "delete_program",
+                                "kind": "workspace_delete",
+                                "description": "Delete the program file.",
+                                "required": True,
+                                "params": {"target_path": "hello_world.py"},
+                                "evidence": ["successful delete_file"],
+                            },
+                        ],
+                        [
+                            {
+                                "kind": "before",
+                                "first": "run_before_change",
+                                "second": "change_printout",
+                                "description": "Run the original program before editing it.",
+                            },
+                            {
+                                "kind": "before",
+                                "first": "change_printout",
+                                "second": "run_after_change",
+                                "description": "Edit the program before running it again.",
+                            },
+                            {
+                                "kind": "before",
+                                "first": "run_after_change",
+                                "second": "delete_program",
+                                "description": "Run the changed program before deleting it.",
+                            },
+                        ],
+                    ),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"run_shell","command":"python3 hello_world.py","timeout_seconds":120}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"action":"replace_in_file","path":"hello_world.py",'
+                                '"old":"Hello, world!","new":"hello USA","max_replacements":1}'
+                            ),
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"delete_file","path":"hello_world.py"}',
+                        }
+                    },
+                    {"message": {"role": "assistant", "content": '{"action":"finish","message":"Done."}'}},
+                ]
+            )
+
+            result = agent.run(
+                "run the program again. and then change the printout to hello USA. "
+                "and then run it again. and then delete the file."
+            )
+
+            self.assertFalse(path.exists())
+            self.assertIn("Hello, world!", result.content)
+            self.assertIn("hello USA", result.content)
+            self.assertEqual(result.content.count("$ python3 hello_world.py"), 2)
+            self.assertEqual(result.turns, 5)
+
+    def test_model_contract_assistant_response_prevents_auto_finish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = make_model_contract_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    contract_response(
+                        [
+                            {
+                                "id": "create_program",
+                                "kind": "workspace_change",
+                                "description": "Create a hello world program.",
+                                "required": True,
+                                "params": {"target_path": "hello.py"},
+                            },
+                            {
+                                "id": "run_program",
+                                "kind": "local_execution",
+                                "description": "Run the hello world program.",
+                                "required": True,
+                                "params": {"target_path": "hello.py"},
+                            },
+                            {
+                                "id": "answer_feeling",
+                                "kind": "assistant_response",
+                                "description": "Tell the user how you are feeling today.",
+                                "required": True,
+                                "params": {"expected_text": "feeling"},
+                            },
+                        ],
+                        [
+                            {"kind": "before", "first": "create_program", "second": "run_program"},
+                            {"kind": "before", "first": "run_program", "second": "answer_feeling"},
+                        ],
+                    ),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"write_file","path":"hello.py","content":"print(\\"Hello, world!\\")\\n"}',
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"finish","message":"The program ran successfully. I am feeling focused today."}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("write and run a simple helloworld python program, and then tell me how you are feeling today.")
+
+            self.assertIn("I am feeling focused today.", result.content)
+            self.assertIn("$ python3 hello.py", result.content)
+            self.assertEqual(result.turns, 3)
 
 
 if __name__ == "__main__":
