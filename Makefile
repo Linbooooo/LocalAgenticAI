@@ -1,10 +1,13 @@
-.PHONY: test eval-smoke eval-medium eval-hard doctor install docker-build docker-doctor compose-up compose-pull-model compose-chat
+.PHONY: test eval-agentic eval-smoke eval-medium eval-hard doctor install docker-build docker-doctor compose-up compose-pull-model compose-chat
 
 test:
 	python3 -m unittest discover -s tests
 
 eval-smoke:
 	python3 scripts/evaluate_agent.py --suite smoke
+
+eval-agentic:
+	python3 scripts/evaluate_agent.py --suite agentic --timeout 300
 
 eval-medium:
 	python3 scripts/evaluate_agent.py --suite medium --timeout 300

@@ -46,6 +46,67 @@ PROMPT_SUITES = {
     "all": SMOKE_PROMPTS + MEDIUM_PROMPTS + HARD_PROMPTS,
 }
 
+AGENTIC_CASES = [
+    {
+        "prompt": "write a python file named count_runs.py that prints agentic-count and run it 3 times.",
+        "checks": {
+            "contains": ["agentic-count"],
+            "count_at_least": {"agentic-count": 3},
+            "file_exists": ["count_runs.py"],
+        },
+    },
+    {
+        "prompt": "write a python file named show_then_run.py that prints source-visible. Display the code, then run it.",
+        "checks": {
+            "contains": ["Observed file contents:", "show_then_run.py", "print", "source-visible"],
+            "count_at_most": {"$ python3 show_then_run.py": 1},
+            "file_exists": ["show_then_run.py"],
+        },
+    },
+    {
+        "prompt": "write and run a python program named cleanup_target.py that prints cleanup-ok, then delete the file.",
+        "checks": {
+            "contains": ["cleanup-ok"],
+            "file_absent": ["cleanup_target.py"],
+        },
+    },
+    {
+        "prompt": (
+            "write a python file named update_twice.py that prints original-marker, run it, change original-marker to updated-marker, "
+            "run it again, then delete the file."
+        ),
+        "checks": {
+            "contains": ["original-marker", "updated-marker"],
+            "file_absent": ["update_twice.py"],
+        },
+    },
+    {
+        "prompt": (
+            "write and run a simple python program named feeling_hello.py that prints Hello Eval, "
+            "and then tell me how you are feeling today."
+        ),
+        "checks": {
+            "contains": ["Hello Eval"],
+            "any_contains_ci": [
+                [
+                    "i am feeling",
+                    "i'm feeling",
+                    "i feel",
+                    "i am doing",
+                    "i'm doing",
+                    "i do not have feelings",
+                    "i don't have feelings",
+                ]
+            ],
+            "not_contains_ci": ["how are you feeling today?", "how about yourself", "what about you"],
+            "count_at_most": {"$ python3 feeling_hello.py": 1},
+            "file_exists": ["feeling_hello.py"],
+        },
+    },
+]
+
+PROMPT_SUITES["agentic"] = AGENTIC_CASES
+
 FAILURE_MARKERS = [
     "I could not get a valid local action",
     "Stopped after",
@@ -73,8 +134,8 @@ def main() -> int:
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[1]
-    prompts = args.prompt or PROMPT_SUITES[args.suite]
-    results = [run_prompt(repo, prompt, args.timeout) for prompt in prompts]
+    prompts = [{"prompt": prompt} for prompt in args.prompt] if args.prompt else PROMPT_SUITES[args.suite]
+    results = [run_case(repo, prompt, args.timeout) for prompt in prompts]
 
     if args.json:
         print(json.dumps(results, indent=2))
@@ -84,7 +145,16 @@ def main() -> int:
     return 1 if any(result["status"] != "PASS" for result in results) else 0
 
 
-def run_prompt(repo: Path, prompt: str, timeout: int) -> dict[str, object]:
+def run_case(repo: Path, case: str | dict[str, object], timeout: int) -> dict[str, object]:
+    if isinstance(case, str):
+        prompt = case
+        checks: dict[str, object] = {}
+    else:
+        prompt = str(case["prompt"])
+        checks = case.get("checks", {})
+        if not isinstance(checks, dict):
+            checks = {}
+
     workspace = tempfile.mkdtemp(prefix="local-agent-eval-")
     command = [
         "python3",
@@ -105,6 +175,8 @@ def run_prompt(repo: Path, prompt: str, timeout: int) -> dict[str, object]:
         completed_successfully = "Completed and verified successfully." in output
         scored_output = _last_command_section(output) if completed_successfully else output
         failed = completed.returncode != 0 or any(marker in scored_output for marker in FAILURE_MARKERS)
+        check_failures = _check_result(Path(workspace), output, checks)
+        failed = failed or bool(check_failures)
         status = "FAIL" if failed else "PASS"
         return {
             "status": status,
@@ -112,6 +184,7 @@ def run_prompt(repo: Path, prompt: str, timeout: int) -> dict[str, object]:
             "workspace": workspace,
             "prompt": prompt,
             "returncode": completed.returncode,
+            "check_failures": check_failures,
             "output": output,
         }
     except subprocess.TimeoutExpired as exc:
@@ -121,6 +194,7 @@ def run_prompt(repo: Path, prompt: str, timeout: int) -> dict[str, object]:
             "workspace": workspace,
             "prompt": prompt,
             "returncode": None,
+            "check_failures": ["Timed out."],
             "output": f"Timed out after {timeout}s.\nstdout={exc.stdout}\nstderr={exc.stderr}",
         }
 
@@ -130,6 +204,11 @@ def print_report(results: list[dict[str, object]]) -> None:
         print(f"=== {index:02d} {result['status']} {result['seconds']}s ===")
         print(result["prompt"])
         print(f"workspace: {result['workspace']}")
+        failures = result.get("check_failures") or []
+        if failures:
+            print("check failures:")
+            for failure in failures:
+                print(f"- {failure}")
         print(_tail(str(result["output"])))
         print()
     passed = sum(result["status"] == "PASS" for result in results)
@@ -147,6 +226,82 @@ def _last_command_section(output: str) -> str:
     if marker not in output:
         return output
     return output.rsplit(marker, 1)[-1]
+
+
+def _check_result(workspace: Path, output: str, checks: dict[str, object]) -> list[str]:
+    failures: list[str] = []
+    for text in _string_list(checks.get("contains")):
+        if text not in output:
+            failures.append(f"Output missing required text: {text!r}")
+
+    output_lower = output.lower()
+    for text in _string_list(checks.get("contains_ci")):
+        if text.lower() not in output_lower:
+            failures.append(f"Output missing required text, case-insensitive: {text!r}")
+
+    for text in _string_list(checks.get("not_contains")):
+        if text in output:
+            failures.append(f"Output contains forbidden text: {text!r}")
+
+    for text in _string_list(checks.get("not_contains_ci")):
+        if text.lower() in output_lower:
+            failures.append(f"Output contains forbidden text, case-insensitive: {text!r}")
+
+    any_contains = checks.get("any_contains")
+    if isinstance(any_contains, list):
+        for group in any_contains:
+            choices = _string_list(group)
+            if choices and not any(choice in output for choice in choices):
+                failures.append(f"Output missing one of: {choices!r}")
+
+    any_contains_ci = checks.get("any_contains_ci")
+    if isinstance(any_contains_ci, list):
+        for group in any_contains_ci:
+            choices = _string_list(group)
+            if choices and not any(choice.lower() in output_lower for choice in choices):
+                failures.append(f"Output missing one of, case-insensitive: {choices!r}")
+
+    count_at_least = checks.get("count_at_least")
+    if isinstance(count_at_least, dict):
+        for text, minimum in count_at_least.items():
+            if not isinstance(text, str):
+                continue
+            try:
+                required = int(minimum)
+            except (TypeError, ValueError):
+                continue
+            observed = output.count(text)
+            if observed < required:
+                failures.append(f"Output contains {text!r} {observed} times, expected at least {required}.")
+
+    count_at_most = checks.get("count_at_most")
+    if isinstance(count_at_most, dict):
+        for text, maximum in count_at_most.items():
+            if not isinstance(text, str):
+                continue
+            try:
+                allowed = int(maximum)
+            except (TypeError, ValueError):
+                continue
+            observed = output.count(text)
+            if observed > allowed:
+                failures.append(f"Output contains {text!r} {observed} times, expected at most {allowed}.")
+
+    for path in _string_list(checks.get("file_exists")):
+        if not (workspace / path).exists():
+            failures.append(f"Expected file to exist: {path}")
+
+    for path in _string_list(checks.get("file_absent")):
+        if (workspace / path).exists():
+            failures.append(f"Expected file to be absent: {path}")
+
+    return failures
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from local_agent.agent import (
     _completion_missing,
     _format_repair_guidance,
     _normalize_written_content,
+    _strip_trailing_question,
     _task_spec,
     _validate_action,
 )
@@ -55,6 +56,11 @@ def contract_response(obligations: list[dict], constraints: list[dict] | None = 
 
 
 class AgentTests(unittest.TestCase):
+    def test_strip_trailing_question_preserves_direct_answer(self):
+        text = "I completed the run. I'm feeling focused today. How about yourself?"
+
+        self.assertEqual(_strip_trailing_question(text), "I completed the run. I'm feeling focused today.")
+
     def test_direct_shell_command_bypasses_model(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = make_agent(Path(directory))
@@ -1415,6 +1421,30 @@ class AgentTests(unittest.TestCase):
             self.assertIn("hello from file", result.content)
             self.assertEqual(result.turns, 3)
 
+    def test_task_contract_forces_source_read_before_running_new_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"action":"write_file","path":"show_then_run.py","content":"print(\\"source-visible\\")\\n"}',
+                        }
+                    },
+                ]
+            )
+
+            result = agent.run("write show_then_run.py that prints source-visible. Display the code, then run it.")
+
+            self.assertIn("Observed file contents:", result.content)
+            self.assertIn("1: print", result.content)
+            self.assertIn("source-visible", result.content)
+            self.assertEqual(result.content.count("$ python3 show_then_run.py"), 1)
+            self.assertEqual(result.turns, 3)
+            self.assertEqual(agent.client.chat.call_count, 2)
+
     def test_edit_contract_rejects_finish_after_only_reading(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "app.py").write_text("print('old')\n", encoding="utf-8")
@@ -1512,12 +1542,6 @@ class AgentTests(unittest.TestCase):
                     {
                         "message": {
                             "role": "assistant",
-                            "content": '{"action":"run_shell","command":"python3 hello_world.py","timeout_seconds":120}',
-                        }
-                    },
-                    {
-                        "message": {
-                            "role": "assistant",
                             "content": (
                                 '{"action":"replace_in_file","path":"hello_world.py",'
                                 '"old":"Hello, world!","new":"hello USA","max_replacements":1}'
@@ -1543,7 +1567,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Hello, world!", result.content)
             self.assertIn("hello USA", result.content)
             self.assertEqual(result.content.count("$ python3 hello_world.py"), 2)
-            self.assertEqual(result.turns, 5)
+            self.assertEqual(result.turns, 4)
 
     def test_model_contract_assistant_response_prevents_auto_finish(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1589,7 +1613,7 @@ class AgentTests(unittest.TestCase):
                     {
                         "message": {
                             "role": "assistant",
-                            "content": '{"action":"finish","message":"The program ran successfully. I am feeling focused today."}',
+                            "content": "The program ran successfully. I am feeling focused today.",
                         }
                     },
                 ]
@@ -1599,7 +1623,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertIn("I am feeling focused today.", result.content)
             self.assertIn("$ python3 hello.py", result.content)
-            self.assertEqual(result.turns, 3)
+            self.assertEqual(result.turns, 2)
 
 
 if __name__ == "__main__":

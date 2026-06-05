@@ -128,7 +128,9 @@ class LocalAgent:
         contract = self._contract_task(task, intent, criteria, task_spec, contract)
 
         for step in range(1, self.config.max_steps + 1):
-            action = self._forced_action(intent, criteria, observations)
+            action = self._contract_forced_action(contract, observations)
+            if action is None:
+                action = self._forced_action(intent, criteria, observations)
             if action is None:
                 action = self._repair_recovery_action(criteria, observations)
             if action is None:
@@ -215,6 +217,28 @@ class LocalAgent:
                         return AgentResult(content=reply, turns=step)
                     continue
 
+            if _is_contract_repeated_unsatisfied_run(action, contract, observations):
+                error = (
+                    "This command already ran after the latest edit without producing expected contract output. "
+                    "Read or edit the target file before running the same command again."
+                )
+                result = {
+                    "ok": False,
+                    "error": error,
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": error,
+                }
+                observations.append(
+                    {
+                        "step": step,
+                        "action": _public_action(action),
+                        "signature": _action_signature(action),
+                        "result": result,
+                    }
+                )
+                continue
+
             if _is_repeated_failed_run(action, observations):
                 result = {
                     "ok": False,
@@ -273,12 +297,21 @@ class LocalAgent:
             if action.get("action") == "run_shell":
                 self.last_shell_command = str(action.get("command", "")).strip()
                 self.last_shell_result = result
+            if _should_finish_with_assistant_response(criteria, observations, contract):
+                reply = self._assistant_response_reply(task, observations, contract)
+                reply = _format_final_reply(reply, observations, contract)
+                self.messages.append({"role": "assistant", "content": reply})
+                return AgentResult(content=reply, turns=step)
             if _should_stop_after_simple_edit(task, intent, criteria, observations, contract):
                 reply = _format_final_reply(_simple_edit_reply(observations[-1]), observations, contract)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
             if _should_stop_after_success(intent, criteria, observations, contract):
                 reply = _format_final_reply("Completed and verified successfully.", observations, contract)
+                self.messages.append({"role": "assistant", "content": reply})
+                return AgentResult(content=reply, turns=step)
+            if _should_stop_after_contract_success(intent, criteria, observations, contract):
+                reply = _format_final_reply("Completed all requested local steps.", observations, contract)
                 self.messages.append({"role": "assistant", "content": reply})
                 return AgentResult(content=reply, turns=step)
             if not result.get("ok") and _should_stop_after_failure(result):
@@ -394,6 +427,8 @@ class LocalAgent:
         if _last_successful_change_step(observations) <= _last_action_step(observations, "run_shell"):
             return None
         file_path = self.config.workspace / self.last_written_file
+        if not file_path.exists():
+            return None
         if criteria.requires_tests and not _is_python_test_file(self.last_written_file) and not _python_file_has_inline_tests(file_path):
             return None
         if criteria.requires_output and not criteria.requires_tests and not _python_file_has_visible_output(file_path):
@@ -405,6 +440,81 @@ class LocalAgent:
             "command": _python_run_command_for_path(self.last_written_file),
             "timeout_seconds": 120,
         }
+
+    def _contract_forced_action(
+        self,
+        contract: TaskContract,
+        observations: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if _last_failed_run_step_after_latest_change(observations) > _last_successful_run_step_after_latest_change(observations):
+            return None
+        missing = task_contract_missing(contract, observations)
+        if not missing:
+            return None
+
+        for constraint in contract.constraints:
+            if constraint.kind != "before":
+                continue
+            first = _contract_obligation_by_id(contract, constraint.first)
+            second = _contract_obligation_by_id(contract, constraint.second)
+            if first is None or second is None or second.kind != "local_execution":
+                continue
+            first_steps = _contract_observation_steps(first, observations)
+            second_steps = _contract_observation_steps(second, observations)
+            if not first_steps:
+                action = self._read_action_for_contract_obligation(first)
+                if action is not None:
+                    return action
+            if first_steps and not any(first_step < second_step for first_step in first_steps for second_step in second_steps):
+                if _has_unsatisfied_recent_run_for_obligation(second, observations):
+                    continue
+                action = self._run_action_for_contract_obligation(second)
+                if action is not None:
+                    return action
+
+        for obligation in contract.obligations:
+            if obligation.kind != "local_execution" or not obligation.required:
+                continue
+            min_successes = int(obligation.params.get("min_successes", 1) or 1)
+            matching_steps = _contract_observation_steps(obligation, observations)
+            if len(matching_steps) >= min_successes:
+                continue
+            if _has_unsatisfied_recent_run_for_obligation(obligation, observations):
+                continue
+            action = self._run_action_for_contract_obligation(obligation)
+            if action is not None:
+                return action
+        return None
+
+    def _run_action_for_contract_obligation(self, obligation: Any) -> dict[str, Any] | None:
+        target_path = str(obligation.params.get("target_path") or "").strip()
+        if not target_path or not target_path.endswith(".py"):
+            return None
+        file_path = self.config.workspace / target_path
+        try:
+            if not file_path.resolve().is_relative_to(self.config.workspace):
+                return None
+        except ValueError:
+            return None
+        if not file_path.exists():
+            return None
+        return {"action": "run_shell", "command": _python_run_command_for_path(target_path), "timeout_seconds": 120}
+
+    def _read_action_for_contract_obligation(self, obligation: Any) -> dict[str, Any] | None:
+        if obligation.kind not in {"source_inspection", "source_report"}:
+            return None
+        target_path = _contract_target_path(obligation) or self.last_written_file
+        if not target_path:
+            return None
+        file_path = self.config.workspace / target_path
+        try:
+            if not file_path.resolve().is_relative_to(self.config.workspace):
+                return None
+        except ValueError:
+            return None
+        if not file_path.exists():
+            return None
+        return {"action": "read_file", "path": target_path, "start_line": 1, "max_lines": 200}
 
     def _apply_action(self, action: dict[str, Any], intent: str) -> dict[str, Any]:
         kind = action.get("action")
@@ -545,9 +655,9 @@ class LocalAgent:
         if repair_guidance:
             parts.append(repair_guidance)
         missing = _completion_missing(criteria, observations)
-        if missing:
+        if missing and not repair_guidance:
             parts.append(_format_completion_missing(missing))
-        if contract is not None:
+        if contract is not None and not repair_guidance:
             contract_missing = task_contract_missing(contract, observations)
             if contract_missing:
                 parts.append(format_contract_missing(contract_missing))
@@ -605,7 +715,34 @@ class LocalAgent:
             raise
         content = str(response.get("message", {}).get("content", "")).strip()
         contract_json = _extract_json_object(content)
-        return contract_from_model_json(contract_json, fallback=fallback)
+        return contract_from_model_json(contract_json, fallback=fallback, task=task)
+
+    def _assistant_response_reply(
+        self,
+        task: str,
+        observations: list[dict[str, Any]],
+        contract: TaskContract,
+    ) -> str:
+        context = "\n\n".join(
+            [
+                "All non-conversational local task obligations are satisfied.",
+                f"User request:\n{task}",
+                format_task_contract(contract),
+                _format_json("Observed local actions", observations),
+                (
+                    "Write the final answer to the user. Include the requested conversational response, "
+                    "and base any local-work claims only on the observed actions. If the user asked a "
+                    "conversational question directed at you, answer it directly in first person; do not "
+                    "ask the question back or add a follow-up question. Do not include command transcripts, "
+                    "shell prompts, code blocks, or a Command results section because the harness will append "
+                    "observed command results."
+                ),
+            ]
+        )
+        response = self._protocol_chat(context)
+        content = str(response.get("message", {}).get("content", "")).strip()
+        content = _strip_trailing_question(content)
+        return content or "Completed the local work and addressed the requested response."
 
     def _chat(
         self,
@@ -882,6 +1019,7 @@ def _format_repair_guidance(criteria: CompletionCriteria, observations: list[dic
         "- The last verification command failed after a code edit.",
         "- Do not answer or finish yet.",
         "- Choose a corrective local action: read_file, replace_in_file, write_file, or run_shell.",
+        "- If the failing source has already been read, the next action should usually edit the file. Do not rerun the same failed command until a file edit or materially different command/stdin changes the outcome.",
         "- Use the traceback/output as ground truth. If the command failed due missing CLI arguments, rerun with representative arguments or edit the file to include a demo/test entry point.",
         "- For assertion failures in generated algorithm tests, audit the test with a brute-force oracle or validity helper before changing expected constants.",
         "- For returned-index problems, repair tests to check index validity and target satisfaction when multiple index orders or answers are possible.",
@@ -925,6 +1063,16 @@ def _should_reject_completion_action(
     return _has_started_local_work(observations)
 
 
+def _should_finish_with_assistant_response(
+    criteria: CompletionCriteria,
+    observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
+) -> bool:
+    if contract is None or not contract.has_obligation("assistant_response") or not observations:
+        return False
+    return not _combined_completion_missing(criteria, observations, contract)
+
+
 def _combined_completion_missing(
     criteria: CompletionCriteria,
     observations: list[dict[str, Any]],
@@ -934,6 +1082,140 @@ def _combined_completion_missing(
     if contract is not None:
         missing.extend(task_contract_missing(contract, observations))
     return _dedupe_strings(missing)
+
+
+def _contract_obligation_by_id(contract: TaskContract, obligation_id: str) -> Any | None:
+    for obligation in contract.obligations:
+        if obligation.id == obligation_id:
+            return obligation
+    return None
+
+
+def _contract_observation_steps(obligation: Any, observations: list[dict[str, Any]]) -> list[int]:
+    steps: list[int] = []
+    for observation in observations:
+        if _observation_satisfies_contract_obligation(observation, obligation):
+            steps.append(int(observation.get("step", 0)))
+    return steps
+
+
+def _observation_satisfies_contract_obligation(observation: dict[str, Any], obligation: Any) -> bool:
+    result = observation.get("result", {})
+    if not result.get("ok"):
+        return False
+    action = observation.get("action", {})
+    action_name = action.get("action")
+    target_path = _contract_target_path(obligation)
+
+    if obligation.kind == "workspace_change":
+        return action_name in {"write_file", "replace_in_file"} and _result_path_matches(result, target_path)
+    if obligation.kind == "workspace_delete":
+        return action_name == "delete_file" and _result_path_matches(result, target_path)
+    if obligation.kind in {"source_inspection", "source_report"}:
+        return action_name == "read_file" and _result_path_matches(result, target_path)
+    if obligation.kind == "local_execution":
+        if action_name != "run_shell" or not _is_executed_shell_observation(observation):
+            return False
+        if target_path and target_path not in _command_path_tokens(str(action.get("command", ""))):
+            return False
+        expected = str(obligation.params.get("expected_text") or "").strip()
+        return not expected or expected in _shell_output_text(observation)
+    if obligation.kind == "visible_output":
+        return action_name == "run_shell" and _has_meaningful_shell_output(observation)
+    if obligation.kind == "test_evidence":
+        return action_name == "run_shell" and _has_passing_test_evidence(observation)
+    return False
+
+
+def _has_unsatisfied_recent_run_for_obligation(obligation: Any, observations: list[dict[str, Any]]) -> bool:
+    expected = str(obligation.params.get("expected_text") or "").strip()
+    target_path = _contract_target_path(obligation)
+    if not expected or not target_path:
+        return False
+    latest_change = _last_successful_change_step(observations)
+    for observation in observations:
+        if int(observation.get("step", 0)) <= latest_change:
+            continue
+        action = observation.get("action", {})
+        if action.get("action") != "run_shell":
+            continue
+        if target_path not in _command_path_tokens(str(action.get("command", ""))):
+            continue
+        if observation.get("result", {}).get("ok") and expected not in _shell_output_text(observation):
+            return True
+    return False
+
+
+def _is_contract_repeated_unsatisfied_run(
+    action: dict[str, Any],
+    contract: TaskContract,
+    observations: list[dict[str, Any]],
+) -> bool:
+    if action.get("action") != "run_shell":
+        return False
+    command = _command_signature(str(action.get("command", "")))
+    if not command:
+        return False
+    latest_change = _last_successful_change_step(observations)
+    current_paths = _command_path_tokens(str(action.get("command", "")))
+    for observation in observations:
+        if int(observation.get("step", 0)) <= latest_change:
+            continue
+        prior_action = observation.get("action", {})
+        if prior_action.get("action") != "run_shell":
+            continue
+        if _command_signature(str(prior_action.get("command", ""))) != command:
+            continue
+        if not observation.get("result", {}).get("ok"):
+            continue
+        for obligation in contract.obligations:
+            if obligation.kind != "local_execution":
+                continue
+            expected = str(obligation.params.get("expected_text") or "").strip()
+            target_path = _contract_target_path(obligation)
+            if not expected or not target_path or target_path not in current_paths:
+                continue
+            if expected not in _shell_output_text(observation):
+                return True
+    return False
+
+
+def _contract_target_path(obligation: Any) -> str:
+    return str(obligation.params.get("target_path") or "").replace("\\", "/").lstrip("./")
+
+
+def _result_path_matches(result: dict[str, Any], target_path: str) -> bool:
+    if not target_path:
+        return True
+    return str(result.get("path") or "").replace("\\", "/").lstrip("./") == target_path
+
+
+def _command_path_tokens(command: str) -> set[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    return {token.replace("\\", "/").lstrip("./") for token in tokens if token.endswith(".py")}
+
+
+def _should_stop_after_contract_success(
+    intent: str,
+    criteria: CompletionCriteria,
+    observations: list[dict[str, Any]],
+    contract: TaskContract | None = None,
+) -> bool:
+    if contract is None or contract.has_obligation("assistant_response") or not observations:
+        return False
+    if intent not in {"read", "edit", "shell"}:
+        return False
+    latest_action = observations[-1].get("action", {}).get("action")
+    if latest_action in {"write_file", "replace_in_file"}:
+        return False
+    if _repair_required(criteria, observations):
+        return False
+    if _combined_completion_missing(criteria, observations, contract):
+        return False
+    return any(obligation.required for obligation in contract.obligations)
 
 
 def _has_started_local_work(observations: list[dict[str, Any]]) -> bool:
@@ -1090,16 +1372,6 @@ def _validate_action(
                 "This run_shell command cannot satisfy the requested visible output because the target Python "
                 "file has no print/test/stdout entry point. Edit the file to display results, create tests, "
                 "or run a different command that produces output."
-            )
-        if _is_repeated_failed_run(action, observations):
-            return (
-                "This run_shell command already failed after the latest edit. Inspect the failure, change the file, "
-                "or run a different verification command before trying the same command again."
-            )
-        if _is_repeated_unproductive_run(action, criteria, observations):
-            return (
-                "This run_shell command already ran after the latest edit without producing the requested output. "
-                "Edit the file to print results, create tests, or run a command that displays evidence."
             )
     elif kind == "read_file" and not str(action.get("path", "")).strip():
         return "read_file requires a non-empty path."
@@ -1732,6 +2004,19 @@ def _format_final_reply(
             lines.append(f"$ {action.get('command', '')}")
             lines.append(_format_shell_result(result))
     return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _strip_trailing_question(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.endswith("?"):
+        return stripped
+    boundary = max(stripped.rfind(".", 0, -1), stripped.rfind("!", 0, -1), stripped.rfind("\n", 0, -1))
+    if boundary <= 0:
+        return stripped
+    question = stripped[boundary + 1 :].strip()
+    if len(question) > 220 or not question.endswith("?"):
+        return stripped
+    return stripped[: boundary + 1].rstrip()
 
 
 def _format_observations(observations: list[dict[str, Any]]) -> str:

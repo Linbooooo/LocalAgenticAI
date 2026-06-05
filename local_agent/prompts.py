@@ -90,7 +90,9 @@ Rules:
 - Commands must be local workspace commands.
 - Use read_file, list_files, or search_text when more local context is needed.
 - Use delete_file only when the user explicitly asked to delete/remove a file.
+- If previous observations show repair is required, unmet completion requirements, or failed verification after local work, do not use answer or finish. Inspect or edit the relevant file, then rerun the relevant local command.
 - When tests fail, do not change expected values just to match broken output. Fix the implementation unless independent evidence shows the expectation is wrong.
+- For algorithm tasks with returned indices, order-insensitive answers, or multiple valid outputs, test validity properties or compare against an independent oracle instead of relying on brittle arbitrary expected values.
 - Base finish messages only on previous action results. Do not invent prior state or test results.
 - If no safe action can satisfy the request, return answer.
 """

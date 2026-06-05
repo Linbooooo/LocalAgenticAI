@@ -232,6 +232,7 @@ Evaluate the agent at three levels:
 - Unit tests for the harness: routing validation, skill selection, action protocol repair, shell normalization, stop-on-success behavior, and workspace safety.
 - Offline coding tasks: fixed prompts in temporary workspaces with assertions on final files, command results, number of steps, and whether the agent verified its work.
 - Live model scorecards: run the same task set after model, prompt, or skill changes and track pass rate, unnecessary tool calls, repeated actions, failed imports, false success claims, and average steps to completion.
+- Agentic completion checks: multi-step prompts with structured assertions for repeated execution, source display before running, file deletion, edit-run-delete ordering, and mixed tool-plus-answer requests.
 
 Good eval tasks should cover simple file creation, existing-code edits, Python test generation, traceback repair, package import handling, and medium algorithm problems where expected outputs can be independently checked.
 
@@ -268,15 +269,19 @@ python3 -m unittest discover -s tests
 Run live model evaluation prompts in temporary workspaces:
 
 ```bash
+python3 scripts/evaluate_agent.py --suite agentic --timeout 300
 python3 scripts/evaluate_agent.py --suite smoke
 python3 scripts/evaluate_agent.py --suite medium --timeout 300
 python3 scripts/evaluate_agent.py --suite hard --timeout 300
 ```
 
+Use `agentic` first when changing the action loop or task-contract layer. Unlike the broader prompt suites, it checks concrete outcomes such as how many times a marker was printed and whether cleanup files remain.
+
 The Makefile exposes the same flows:
 
 ```bash
 make test
+make eval-agentic
 make eval-smoke
 make eval-medium
 make eval-hard

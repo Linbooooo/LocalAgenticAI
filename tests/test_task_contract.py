@@ -70,6 +70,19 @@ class TaskContractTests(unittest.TestCase):
 
         self.assertFalse(contract.has_obligation("source_report"))
 
+    def test_conversational_subtask_gets_fallback_obligation(self):
+        contract = derive_task_contract(
+            task="write and run hello.py, then tell me how you are feeling today",
+            intent="edit",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+            target_path="hello.py",
+            operation="create",
+        )
+
+        self.assertTrue(contract.has_obligation("assistant_response"))
+
     def test_model_contract_validates_ordered_run_edit_run_delete(self):
         fallback = derive_task_contract(
             task="run it, change it, run it again, then delete it",
@@ -149,6 +162,125 @@ class TaskContractTests(unittest.TestCase):
 
         self.assertTrue(contract_missing(contract, incomplete))
         self.assertEqual(contract_missing(contract, complete), [])
+
+    def test_model_assistant_response_is_filtered_when_not_requested(self):
+        fallback = derive_task_contract(
+            task="run hello.py 3 times",
+            intent="shell",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+            target_path="hello.py",
+        )
+        contract = contract_from_model_json(
+            {
+                "obligations": [
+                    {
+                        "id": "run_program",
+                        "kind": "local_execution",
+                        "description": "Run the program.",
+                        "required": True,
+                        "params": {"target_path": "hello.py", "min_successes": 3},
+                    },
+                    {
+                        "id": "respond",
+                        "kind": "assistant_response",
+                        "description": "Respond to the user.",
+                        "required": True,
+                    },
+                ],
+                "constraints": [],
+            },
+            fallback=fallback,
+            task="run hello.py 3 times",
+        )
+
+        self.assertFalse(contract.has_obligation("assistant_response"))
+
+    def test_model_contract_drops_evidence_only_ordering_constraints(self):
+        fallback = derive_task_contract(
+            task="run hello.py and display the output",
+            intent="shell",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+            target_path="hello.py",
+        )
+        contract = contract_from_model_json(
+            {
+                "obligations": [
+                    {
+                        "id": "run_program",
+                        "kind": "local_execution",
+                        "description": "Run the program.",
+                        "required": True,
+                        "params": {"target_path": "hello.py"},
+                    },
+                    {
+                        "id": "show_output",
+                        "kind": "visible_output",
+                        "description": "Display command output.",
+                        "required": True,
+                    },
+                    {
+                        "id": "respond",
+                        "kind": "assistant_response",
+                        "description": "Respond conversationally.",
+                        "required": True,
+                    },
+                ],
+                "constraints": [
+                    {"kind": "before", "first": "run_program", "second": "show_output"},
+                    {"kind": "before", "first": "show_output", "second": "respond"},
+                ],
+            },
+            fallback=fallback,
+            task="run hello.py and display the output, then tell me how you feel",
+        )
+        observations = [
+            {
+                "step": 1,
+                "action": {"action": "run_shell", "command": "python3 hello.py"},
+                "result": {"ok": True, "returncode": 0, "stdout": "hello\n", "stderr": ""},
+            }
+        ]
+
+        self.assertEqual(contract.constraints, ())
+        self.assertEqual(contract_missing(contract, observations), [])
+
+    def test_model_contract_infers_target_path_from_python_command(self):
+        fallback = derive_task_contract(
+            task="run hello.py",
+            intent="shell",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+        )
+        contract = contract_from_model_json(
+            {
+                "obligations": [
+                    {
+                        "id": "run_program",
+                        "kind": "local_execution",
+                        "description": "Run the program.",
+                        "required": True,
+                        "params": {"command": "python hello.py"},
+                    }
+                ],
+                "constraints": [],
+            },
+            fallback=fallback,
+            task="run hello.py",
+        )
+        observations = [
+            {
+                "step": 1,
+                "action": {"action": "run_shell", "command": "python3 hello.py"},
+                "result": {"ok": True, "returncode": 0, "stdout": "hello\n", "stderr": ""},
+            }
+        ]
+
+        self.assertEqual(contract_missing(contract, observations), [])
 
 
 if __name__ == "__main__":

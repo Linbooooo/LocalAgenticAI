@@ -149,6 +149,16 @@ def derive_task_contract(
             )
         )
 
+    if _looks_like_assistant_response_request(task):
+        obligations.append(
+            ContractObligation(
+                id="assistant_response",
+                kind="assistant_response",
+                description="Provide the requested conversational answer to the user.",
+                evidence=("final assistant response addresses the requested conversational answer",),
+            )
+        )
+
     if _needs_source_before_execution(text) and _has_kind(obligations, "source_inspection") and _has_kind(
         obligations, "local_execution"
     ):
@@ -164,12 +174,15 @@ def derive_task_contract(
     return TaskContract(intent=intent, obligations=tuple(_dedupe_obligations(obligations)), constraints=tuple(constraints))
 
 
-def contract_from_model_json(value: Any, *, fallback: TaskContract) -> TaskContract:
+def contract_from_model_json(value: Any, *, fallback: TaskContract, task: str = "") -> TaskContract:
     if not isinstance(value, dict):
         return fallback
 
-    obligations = _parse_model_obligations(value.get("obligations"))
-    constraints = _parse_model_constraints(value.get("constraints"), {obligation.id for obligation in obligations})
+    obligations = _filter_model_obligations(_parse_model_obligations(value.get("obligations")), task)
+    constraints = _filter_constraints(
+        _parse_model_constraints(value.get("constraints"), {obligation.id for obligation in obligations}),
+        obligations,
+    )
     if not obligations:
         return fallback
 
@@ -334,6 +347,13 @@ def _looks_like_delete_request(text: str) -> bool:
     return bool(re.search(r"\b(delete|remove|unlink)\b", text))
 
 
+def _looks_like_assistant_response_request(task: str) -> bool:
+    text = task.lower()
+    return bool(
+        re.search(r"\b(tell me|explain|summarize|describe|answer|report|how are you|how you are|feeling|feel today)\b", text)
+    )
+
+
 def _looks_like_discovery_request(text: str) -> bool:
     has_discovery_verb = bool(re.search(r"\b(scan|find|search|look for|list|locate|inspect)\b", text))
     has_workspace_target = bool(
@@ -420,6 +440,12 @@ def _parse_model_obligations(value: Any) -> list[ContractObligation]:
     return obligations
 
 
+def _filter_model_obligations(obligations: list[ContractObligation], task: str) -> list[ContractObligation]:
+    if _looks_like_assistant_response_request(task):
+        return obligations
+    return [obligation for obligation in obligations if obligation.kind != "assistant_response"]
+
+
 def _parse_model_constraints(value: Any, obligation_ids: set[str]) -> list[ContractConstraint]:
     if not isinstance(value, list):
         return []
@@ -462,7 +488,11 @@ def _merge_contracts(primary: TaskContract, fallback: TaskContract) -> TaskContr
             continue
         constraints.append(constraint)
         existing_constraints.add(key)
-    return TaskContract(intent=fallback.intent, obligations=tuple(obligations), constraints=tuple(constraints))
+    return TaskContract(
+        intent=fallback.intent,
+        obligations=tuple(obligations),
+        constraints=tuple(_filter_constraints(constraints, obligations)),
+    )
 
 
 def _dedupe_obligations(obligations: list[ContractObligation]) -> list[ContractObligation]:
@@ -474,6 +504,31 @@ def _dedupe_obligations(obligations: list[ContractObligation]) -> list[ContractO
         seen.add(obligation.id)
         unique.append(obligation)
     return unique
+
+
+def _filter_constraints(
+    constraints: list[ContractConstraint],
+    obligations: list[ContractObligation],
+) -> list[ContractConstraint]:
+    by_id = {obligation.id: obligation for obligation in obligations}
+    material_kinds = {
+        "workspace_change",
+        "workspace_delete",
+        "workspace_discovery",
+        "source_inspection",
+        "source_report",
+        "local_execution",
+    }
+    filtered: list[ContractConstraint] = []
+    for constraint in constraints:
+        first = by_id.get(constraint.first)
+        second = by_id.get(constraint.second)
+        if first is None or second is None:
+            continue
+        if first.kind not in material_kinds or second.kind not in material_kinds:
+            continue
+        filtered.append(constraint)
+    return filtered
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -519,6 +574,8 @@ def _candidate_observations(obligation: ContractObligation, ledger: EvidenceLedg
         observations = ledger.successful_runs
         if not target_path and not command:
             observations = _relevant_successful_runs(ledger)
+        if target_path:
+            command = ""
         return tuple(
             observation
             for observation in observations
@@ -569,6 +626,13 @@ def _normalized_command_paths(command: str) -> set[str]:
     return {_normalized_path(token) for token in tokens if _normalized_path(token)}
 
 
+def _target_path_from_command(command: str) -> str | None:
+    for path in _normalized_command_paths(command):
+        if path and path.endswith(".py") and not path.startswith("/") and ".." not in path.split("/"):
+            return path
+    return None
+
+
 def _allowed_obligation_kinds() -> set[str]:
     return {
         "workspace_change",
@@ -598,6 +662,10 @@ def _sanitize_params(value: Any) -> dict[str, Any]:
         params["min_successes"] = max(1, min(min_successes, 100))
     elif isinstance(min_successes, str) and min_successes.isdigit():
         params["min_successes"] = max(1, min(int(min_successes), 100))
+    if not params.get("target_path") and params.get("command"):
+        target_path = _target_path_from_command(str(params["command"]))
+        if target_path:
+            params["target_path"] = target_path
     return params
 
 
