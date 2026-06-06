@@ -4,6 +4,12 @@ Local Agentic AI is a local-only coding agent backed by Ollama. It can inspect a
 
 The project is intentionally small: a Python CLI, an Ollama client, a deterministic control layer implemented by `LocalAgent`, workspace-confined actions, and Docker deployment files.
 
+## Documentation
+
+- [Architecture](docs/architecture.md): routing, task contracts, evidence, tools, memory, and the observe-act loop.
+- [Operations](docs/operations.md): installation, startup after reboot, Docker/GPU deployment, health checks, and troubleshooting.
+- [Evaluation](docs/evaluation.md): unit tests, live suites, agentic assertions, and how to interpret failures.
+
 ## Features
 
 - Local Ollama inference with no required cloud API.
@@ -14,6 +20,7 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - Model-based semantic routing for chat, read, hardware, shell, and edit tasks.
 - Isolated route/action protocol calls with explicit current request, workspace snapshot, and structured agent state.
 - Model-extracted task contracts and an evidence ledger for richer completion checks beyond simple run/test/output flags.
+- Ordered multi-step execution for requests such as create, run, modify, rerun, report, and delete.
 - Deterministic action validation for repeated failed commands, missing test directories, missing stdout entry points, and premature success claims.
 - Lightweight coding skills for project discovery, Python testing, debugging, and algorithm verification.
 - Confirmation prompts for mutating actions unless `--yes` is supplied.
@@ -34,17 +41,19 @@ Useful references:
 ## Requirements
 
 - Python 3.11+
-- Ollama
 - Git
-- Docker and Docker Compose for containerized deployment
-- NVIDIA Container Toolkit for GPU-backed Docker inference
+- One Ollama deployment:
+  - Ollama installed on the host or inside WSL, or
+  - Docker Desktop/Docker Engine with Docker Compose
+- NVIDIA drivers plus Docker GPU support for GPU-backed inference; native Linux Docker commonly uses NVIDIA Container Toolkit, while Docker Desktop uses its WSL GPU integration
 
 ## Local Installation
 
-Install the CLI in a local virtual environment:
+Install the CLI into the repository virtual environment:
 
 ```bash
 bash scripts/install_local.sh
+. .venv/bin/activate
 ```
 
 Install Ollama if needed:
@@ -59,10 +68,12 @@ Start Ollama with local-first settings:
 bash scripts/run_ollama_tuned.sh
 ```
 
+Run that command in a dedicated terminal because it stays attached to the Ollama server.
+
 Pull the default model:
 
 ```bash
-ollama pull qwen2.5-coder:14b
+bash scripts/pull_model.sh
 ```
 
 Run a health check:
@@ -83,10 +94,19 @@ Run a one-shot task:
 python3 -m local_agent "Inspect this repository and summarize the project."
 ```
 
-After `scripts/install_local.sh`, the console entry point is also available:
+After activating `.venv`, the console entry point is also available:
 
 ```bash
 local-agent chat
+```
+
+Other CLI modes:
+
+```bash
+python3 -m local_agent hardware
+python3 -m local_agent preload
+python3 -m local_agent --workspace /path/to/project chat
+python3 -m local_agent --yes "Create hello.py, run it, and show the output."
 ```
 
 ## Docker Deployment
@@ -115,13 +135,23 @@ docker compose --profile setup run --rm model-pull
 docker compose --profile agent run --rm agent chat
 ```
 
+After a reboot, start Docker Desktop or Docker Engine first, then run:
+
+```bash
+docker compose up -d ollama
+docker compose --profile agent run --rm agent doctor
+docker compose --profile agent run --rm agent chat
+```
+
 Reuse an existing Ollama Docker volume:
 
 ```bash
 OLLAMA_DATA_VOLUME=your_existing_volume OLLAMA_DATA_VOLUME_EXTERNAL=true docker compose up -d ollama
 ```
 
-The Compose Ollama service binds to `127.0.0.1:11434`, disables Ollama cloud mode, and is configured for NVIDIA GPU access with `gpus: all`.
+The Compose Ollama service binds to `127.0.0.1:11434`, disables Ollama cloud mode, stores models in the named `ollama-data` volume, and requests NVIDIA GPU access with `gpus: all`. On Windows, Docker Desktop must be running and WSL integration must be enabled for the Ubuntu distribution.
+
+See [docs/operations.md](docs/operations.md) for restart and troubleshooting procedures.
 
 ## Configuration
 
@@ -144,6 +174,8 @@ Example:
   "num_predict": 2048,
   "temperature": 0.2,
   "top_p": 0.9,
+  "repeat_penalty": 1.05,
+  "num_thread": 12,
   "keep_alive": "30m",
   "ollama_timeout": 300,
   "trust": "ask",
@@ -162,6 +194,11 @@ Supported environment variables:
 - `LOCAL_AGENT_MAX_NUM_CTX`
 - `LOCAL_AGENT_MIN_NUM_CTX`
 - `LOCAL_AGENT_NUM_PREDICT`
+- `LOCAL_AGENT_TEMPERATURE`
+- `LOCAL_AGENT_TOP_P`
+- `LOCAL_AGENT_REPEAT_PENALTY`
+- `LOCAL_AGENT_NUM_THREAD`
+- `LOCAL_AGENT_KEEP_ALIVE`
 - `LOCAL_AGENT_TRUST`
 - `LOCAL_AGENT_ALLOW_NETWORK_TOOLS`
 - `LOCAL_AGENT_OLLAMA_TIMEOUT`
@@ -194,6 +231,7 @@ Main components:
 - [local_agent/tools.py](local_agent/tools.py): workspace file actions, shell execution, hardware profile, and safety checks.
 - [local_agent/context.py](local_agent/context.py): bounded context packing.
 - [local_agent/ollama_client.py](local_agent/ollama_client.py): local Ollama HTTP client.
+- [local_agent/prompts.py](local_agent/prompts.py): isolated router, contract, and action JSON protocols.
 
 `LocalAgent` routes after asking the model for a semantic route:
 
@@ -207,7 +245,7 @@ Routing and action-mode responses go through protocol layers before execution. `
 
 The normal chat path may use conversation history, but route/action protocol calls are isolated from the prior assistant transcript. The action prompt is self-contained: it includes the current user request, a bounded workspace snapshot, selected coding skills, completion requirements, a task contract, prior observations from the current task, and structured state such as the last written file and last shell command. This prevents stale outputs from an earlier task from poisoning the next tool decision while still letting the model resolve references like "test it" from agent state.
 
-The task contract layer asks the model to extract structured obligations such as workspace changes, file deletion, discovery, source inspection/reporting, local execution, test evidence, visible output, assistant-response duties, repeated successful executions, and ordering constraints. The harness validates and normalizes that contract, merges in conservative fallback obligations, builds an evidence ledger from actual tool observations, and rejects premature `finish`/`answer` actions when required evidence is missing. Set `contract_mode` to `fallback` to disable model contract extraction and use the deterministic fallback path.
+The task contract layer asks the model to extract structured obligations such as workspace changes, file deletion, discovery, source inspection/reporting, local execution, test evidence, visible output, assistant-response duties, repeated successful executions, and ordering constraints. The harness validates and normalizes that contract, merges in conservative fallback obligations, builds an evidence ledger from actual tool observations, can force missing read/run steps when the target is known, and rejects premature `finish`/`answer` actions when required evidence is missing. Set `contract_mode` to `fallback` to disable model contract extraction and use the deterministic fallback path.
 
 Repair planning is also validated outside the model. The harness rejects duplicate failed shell commands before rerunning them, blocks repeated identical rewrites, keeps command comparisons normalized across common Python invocation forms, and stops when the model cannot produce a corrective action after a failed verification.
 
@@ -227,7 +265,7 @@ This keeps common coding workflows close to the agent without widening the tool 
 
 ## Evaluation
 
-Evaluate the agent at three levels:
+Evaluate the agent at four levels:
 
 - Unit tests for the harness: routing validation, skill selection, action protocol repair, shell normalization, stop-on-success behavior, and workspace safety.
 - Offline coding tasks: fixed prompts in temporary workspaces with assertions on final files, command results, number of steps, and whether the agent verified its work.
@@ -236,13 +274,16 @@ Evaluate the agent at three levels:
 
 Good eval tasks should cover simple file creation, existing-code edits, Python test generation, traceback repair, package import handling, and medium algorithm problems where expected outputs can be independently checked.
 
+See [docs/evaluation.md](docs/evaluation.md) for suite contents, assertion types, and recommended workflow.
+
 ## Safety
 
 - Ollama endpoints must be local: loopback, `host.docker.internal`, or the Compose service name `ollama`.
 - Filesystem operations are confined to the configured workspace.
 - Network-capable shell commands are blocked by default.
 - Destructive shell patterns are blocked by default.
-- Mutating actions prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
+- `write_file`, `replace_in_file`, `delete_file`, and `run_shell` prompt before execution unless `trust` is set to `auto` or `--yes` is supplied.
+- `delete_file` only accepts files inside the configured workspace; directory deletion is not supported.
 - The model decides the semantic route; the deterministic `LocalAgent` control layer validates that route and enforces safety boundaries before any tool runs.
 - Malformed or incomplete action responses are rejected and retried before any local side effect runs.
 
