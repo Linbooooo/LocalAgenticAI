@@ -30,7 +30,7 @@ bash scripts/setup_ollama_linux.sh
 Start Ollama in a dedicated terminal:
 
 ```bash
-bash scripts/run_ollama_tuned.sh
+bash scripts/run_ollama_tuned.sh gpu
 ```
 
 In another terminal:
@@ -53,13 +53,26 @@ Requirements:
 - Docker Compose is available.
 - NVIDIA GPU support is configured if GPU inference is expected.
 
-Start Ollama and pull the model:
+Start GPU-backed Ollama and pull the model:
 
 ```bash
 cd ~/LocalAgenticAI
-docker compose up -d ollama
+cp .env.example .env
+make compose-gpu
 docker compose --profile setup run --rm model-pull
 ```
+
+Start CPU-only Ollama instead:
+
+```bash
+make compose-cpu
+```
+
+Switching modes recreates the Ollama container but preserves the shared model volume.
+If the models already live in a differently named volume, set
+`OLLAMA_DATA_VOLUME` and `OLLAMA_DATA_VOLUME_EXTERNAL=true` in `.env` before running
+either target. See [Performance Benchmarks](performance.md) for the complete
+switching and measurement workflow.
 
 Check the containerized agent:
 
@@ -86,7 +99,7 @@ For Docker Desktop on Windows:
 
 ```bash
 cd ~/LocalAgenticAI
-docker compose up -d ollama
+make compose-gpu
 python3 -m local_agent doctor
 python3 -m local_agent chat
 ```
@@ -101,7 +114,7 @@ For a native WSL/Linux Ollama installation:
 
 ```bash
 cd ~/LocalAgenticAI
-bash scripts/run_ollama_tuned.sh
+bash scripts/run_ollama_tuned.sh gpu
 ```
 
 Then open a second terminal and run:
@@ -148,6 +161,8 @@ nvidia-smi
 ```
 
 `doctor` and `ollama ps` should report nonzero VRAM use when the model is GPU-backed. Use `python3 -m local_agent preload` to load and keep the configured model resident.
+
+For repeatable CPU/GPU latency and throughput measurements, see [Performance Benchmarks](performance.md).
 
 ## Common Problems
 

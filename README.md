@@ -9,6 +9,7 @@ The project is intentionally small: a Python CLI, an Ollama client, a determinis
 - [Architecture](docs/architecture.md): routing, task contracts, evidence, tools, memory, and the observe-act loop.
 - [Operations](docs/operations.md): installation, startup after reboot, Docker/GPU deployment, health checks, and troubleshooting.
 - [Evaluation](docs/evaluation.md): unit tests, live suites, agentic assertions, and how to interpret failures.
+- [Performance](docs/performance.md): CPU/GPU switching, TTFT/TPS methodology, and recorded benchmark results.
 
 ## Features
 
@@ -130,7 +131,8 @@ docker run --rm -it \
 Run the full stack with Docker Compose:
 
 ```bash
-docker compose up -d ollama
+cp .env.example .env
+make compose-gpu
 docker compose --profile setup run --rm model-pull
 docker compose --profile agent run --rm agent chat
 ```
@@ -138,7 +140,7 @@ docker compose --profile agent run --rm agent chat
 After a reboot, start Docker Desktop or Docker Engine first, then run:
 
 ```bash
-docker compose up -d ollama
+make compose-gpu
 docker compose --profile agent run --rm agent doctor
 docker compose --profile agent run --rm agent chat
 ```
@@ -146,10 +148,14 @@ docker compose --profile agent run --rm agent chat
 Reuse an existing Ollama Docker volume:
 
 ```bash
-OLLAMA_DATA_VOLUME=your_existing_volume OLLAMA_DATA_VOLUME_EXTERNAL=true docker compose up -d ollama
+cp .env.example .env
+# Edit .env:
+# OLLAMA_DATA_VOLUME=your_existing_volume
+# OLLAMA_DATA_VOLUME_EXTERNAL=true
+make compose-gpu
 ```
 
-The Compose Ollama service binds to `127.0.0.1:11434`, disables Ollama cloud mode, stores models in the named `ollama-data` volume, and requests NVIDIA GPU access with `gpus: all`. On Windows, Docker Desktop must be running and WSL integration must be enabled for the Ubuntu distribution.
+The ignored `.env` file keeps machine-specific volume and GPU settings across commands. The Compose Ollama service binds to `127.0.0.1:11434`, disables Ollama cloud mode, and stores models in the selected named volume. The base Compose file forces CPU inference; `docker-compose.gpu.yml` adds NVIDIA GPU access. Use `make compose-cpu` or `make compose-gpu` to switch modes. On Windows, Docker Desktop must be running and WSL integration must be enabled for the Ubuntu distribution.
 
 See [docs/operations.md](docs/operations.md) for restart and troubleshooting procedures.
 
