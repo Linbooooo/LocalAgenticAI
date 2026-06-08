@@ -9,13 +9,22 @@ from local_agent.agent import (
     LocalAgent,
     _command_signature,
     _completion_missing,
+    _completion_criteria,
+    _deterministic_edit_scope_issues,
     _format_repair_guidance,
     _normalize_written_content,
+    _looks_like_edit_or_test_creation_request,
+    _python_run_command_for_path,
+    _repair_python_assert_expected_literals,
+    _review_failure_is_external_evidence_only,
     _strip_trailing_question,
     _task_spec,
+    _tool_intent_for_action,
     _validate_action,
+    _validate_action_against_contract,
 )
 from local_agent.config import AgentConfig
+from local_agent.task_contract import derive_task_contract
 
 
 def make_agent(workspace: Path) -> LocalAgent:
@@ -51,6 +60,15 @@ def contract_response(obligations: list[dict], constraints: list[dict] | None = 
         "message": {
             "role": "assistant",
             "content": json.dumps({"obligations": obligations, "constraints": constraints or []}),
+        }
+    }
+
+
+def review_response(satisfied: bool, reason: str = "reviewed", missing: list[str] | None = None):
+    return {
+        "message": {
+            "role": "assistant",
+            "content": json.dumps({"satisfied": satisfied, "reason": reason, "missing": missing or []}),
         }
     }
 
@@ -113,6 +131,251 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.last_written_file, "hello.py")
             self.assertEqual(result.turns, 2)
             self.assertEqual(agent.client.chat.call_count, 2)
+
+    def test_existing_file_update_reads_then_reviews_before_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "normalizer.py")
+            path.write_text("def normalize_name(value):\n    return value.strip().lower()\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit"),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "replace_in_file",
+                                    "path": "normalizer.py",
+                                    "old": "return value.strip().lower()",
+                                    "new": "return '-'.join(value.strip().lower().split())",
+                                }
+                            ),
+                        }
+                    },
+                    review_response(True, "The function now lowercases and hyphenates whitespace."),
+                ]
+            )
+
+            result = agent.run("modify normalizer.py so normalize_name lowercases and replaces spaces with hyphens")
+
+            self.assertIn("Completed all requested local steps.", result.content)
+            self.assertIn("'-'.join", path.read_text(encoding="utf-8"))
+            self.assertEqual(result.turns, 3)
+            self.assertEqual(agent.client.chat.call_count, 3)
+            action_context = agent.client.chat.call_args_list[1].kwargs["messages"][1]["content"]
+            self.assertIn("def normalize_name(value):", action_context)
+            review_context = agent.client.chat.call_args_list[2].kwargs["messages"][1]["content"]
+            self.assertIn("Original source before this edit:", review_context)
+            self.assertIn("Edited source:", review_context)
+
+    def test_failed_edit_review_requires_corrective_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "pricing.py")
+            path.write_text("def total(price, tax):\n    return price + tax\n", encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit"),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "action": "replace_in_file",
+                                    "path": "pricing.py",
+                                    "old": "return price + tax",
+                                    "new": "return price",
+                                }
+                            ),
+                        }
+                    },
+                    review_response(False, "The edit removed tax instead of applying a percentage.", ["tax is ignored"]),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {
+                                    "path": "pricing.py",
+                                    "content": "def total(price, tax):\n    return price * (1 + tax)\n",
+                                }
+                            ),
+                        }
+                    },
+                    review_response(True, "The function now applies tax as a percentage multiplier."),
+                ]
+            )
+
+            result = agent.run("change pricing.py so total treats tax as a percentage rate")
+
+            self.assertIn("Completed all requested local steps.", result.content)
+            self.assertIn("return price * (1 + tax)", path.read_text(encoding="utf-8"))
+            self.assertEqual(result.turns, 6)
+            self.assertEqual(agent.client.chat.call_count, 5)
+            corrective_context = agent.client.chat.call_args_list[3].kwargs["messages"][1]["content"]
+            self.assertIn("Repair a code edit that failed semantic review", corrective_context)
+            self.assertIn("tax is ignored", corrective_context)
+
+    def test_test_only_edit_preserves_implementation_and_reports_final_evidence_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "two_sum.py")
+            original = (
+                "def two_sum(nums, target):\n"
+                "    seen = {}\n"
+                "    for index, value in enumerate(nums):\n"
+                "        if target - value in seen:\n"
+                "            return [seen[target - value], index]\n"
+                "        seen[value] = index\n"
+                "    return []\n\n"
+                "if __name__ == '__main__':\n"
+                "    print(two_sum([2, 7, 11, 15], 9))\n"
+            )
+            wrong = (
+                "def new_two_sum(nums, target):\n"
+                "    for left in range(len(nums)):\n"
+                "        for right in range(left + 1, len(nums)):\n"
+                "            if nums[left] + nums[right] == target:\n"
+                "                return [left, right]\n"
+                "    return []\n\n"
+                "if __name__ == '__main__':\n"
+                "    print(new_two_sum([1, 4, 6, 8], 10))\n"
+            )
+            corrected = original.replace(
+                "    print(two_sum([2, 7, 11, 15], 9))",
+                "    cases = [([1, 4, 6, 8], 10), ([3, 3, 9], 6), ([-4, 1, 5], 1)]\n"
+                "    for nums, target in cases:\n"
+                "        result = two_sum(nums, target)\n"
+                "        print(nums, target, result)",
+            )
+            path.write_text(original, encoding="utf-8")
+            agent = make_agent(Path(directory))
+            agent.client.chat = Mock(
+                side_effect=[
+                    route_response("edit", requires_run=True),
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"action": "write_file", "path": "two_sum.py", "content": wrong}),
+                        }
+                    },
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"path": "two_sum.py", "content": corrected}),
+                        }
+                    },
+                    review_response(True, "Only the test/demo cases changed; two_sum is preserved."),
+                ]
+            )
+
+            result = agent.run(
+                "go into two_sum.py and change the test to a completely different, more complicated one. "
+                "Run it and display the code and results."
+            )
+
+            self.assertEqual(path.read_text(encoding="utf-8"), corrected)
+            self.assertIn("def two_sum(nums, target):", result.content)
+            self.assertNotIn("def new_two_sum", result.content)
+            self.assertEqual(result.content.count("`two_sum.py`:"), 1)
+            self.assertEqual(result.content.count("$ python3 two_sum.py"), 1)
+            self.assertIn("[-4, 1, 5] 1 [0, 2]", result.content)
+            self.assertEqual(result.turns, 8)
+
+    def test_test_only_scope_rejects_implementation_rewrite(self):
+        original = "def two_sum(nums, target):\n    return []\n\nprint(two_sum([2, 7], 9))\n"
+        edited = "def new_two_sum(nums, target):\n    return [0, 1]\n\nprint(new_two_sum([2, 7], 9))\n"
+
+        issues = _deterministic_edit_scope_issues("two_sum.py", "tests_only", original, edited)
+
+        self.assertTrue(any("two_sum" in issue for issue in issues))
+
+    def test_edit_review_defers_runtime_only_complaints_to_evidence_ledger(self):
+        self.assertTrue(
+            _review_failure_is_external_evidence_only(
+                "The source looks correct, but runtime proof is missing.",
+                ["test execution and output"],
+            )
+        )
+        self.assertTrue(
+            _review_failure_is_external_evidence_only(
+                "The edit is complete, but reporting remains.",
+                ["test execution", "final code display", "results display"],
+            )
+        )
+        self.assertFalse(
+            _review_failure_is_external_evidence_only(
+                "The source changed the implementation.",
+                ["two_sum was renamed", "tests were not run"],
+            )
+        )
+
+    def test_uninvoked_free_test_function_gets_explicit_standard_library_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "sample.py")
+            path.write_text(
+                "def test_sample():\n"
+                "    assert 2 + 2 == 4\n\n"
+                "if __name__ == '__main__':\n"
+                "    print('demo')\n",
+                encoding="utf-8",
+            )
+
+            command = _python_run_command_for_path("sample.py", path)
+
+            self.assertIn("runpy.run_path", command)
+            self.assertTrue(command.endswith(" sample.py"))
+
+    def test_test_function_called_from_main_keeps_direct_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "sample.py")
+            path.write_text(
+                "def test_sample():\n"
+                "    assert 2 + 2 == 4\n\n"
+                "if __name__ == '__main__':\n"
+                "    test_sample()\n"
+                "    print('All tests passed.')\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(_python_run_command_for_path("sample.py", path), "python3 sample.py")
+
+    def test_unittest_case_in_regular_module_uses_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "sample.py")
+            path.write_text(
+                "import unittest\n\n"
+                "class SampleTests(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _python_run_command_for_path("sample.py", path),
+                "python3 -m unittest discover -s . -p sample.py",
+            )
+
+    def test_test_only_assertion_repair_uses_preserved_implementation_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "two_sum.py")
+            path.write_text(
+                "def two_sum(nums, target):\n"
+                "    seen = {}\n"
+                "    for index, value in enumerate(nums):\n"
+                "        if target - value in seen:\n"
+                "            return [seen[target - value], index]\n"
+                "        seen[value] = index\n"
+                "    return []\n\n"
+                "def test_two_sum():\n"
+                "    assert two_sum([1, 2, 3, 4, 5], 10) == [3, 4]\n",
+                encoding="utf-8",
+            )
+
+            repaired = _repair_python_assert_expected_literals(path)
+
+            self.assertIsNotNone(repaired)
+            self.assertIn("def two_sum(nums, target):", repaired)
+            self.assertIn("two_sum([1, 2, 3, 4, 5], 10) == []", repaired)
 
     def test_written_unittest_file_runs_with_discovery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,7 +488,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("$ python3 three_sum.py", result.content)
             self.assertIn("[[-1, 0, 1]]", result.content)
             self.assertEqual(result.content.count("$ python3 three_sum.py"), 1)
-            self.assertEqual(result.turns, 3)
+            self.assertEqual(result.turns, 4)
 
     def test_failed_unittest_output_does_not_satisfy_test_completion(self):
         observations = [
@@ -279,6 +542,31 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(missing, [])
 
+    def test_none_results_phrase_does_not_require_command_output(self):
+        criteria = _completion_criteria(
+            "modify cache.py so get_or_create does not store None results in the cache",
+            route_requires_run=True,
+            intent="edit",
+        )
+
+        self.assertFalse(criteria.requires_run)
+        self.assertFalse(criteria.requires_output)
+
+    def test_explicit_display_results_requires_output(self):
+        criteria = _completion_criteria(
+            "modify cache.py, run it, and display the results",
+            route_requires_run=True,
+            intent="edit",
+        )
+
+        self.assertTrue(criteria.requires_run)
+        self.assertTrue(criteria.requires_output)
+
+    def test_shell_route_can_require_run_without_execution_keyword(self):
+        criteria = _completion_criteria("benchmark the local model", route_requires_run=True, intent="shell")
+
+        self.assertTrue(criteria.requires_run)
+
     def test_silent_run_is_rejected_before_execution_when_output_is_required(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = make_agent(Path(directory))
@@ -330,7 +618,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertIn("[]", result.content)
             self.assertEqual(result.content.count("$ python3 three_sum.py"), 1)
-            self.assertEqual(result.turns, 3)
+            self.assertEqual(result.turns, 4)
 
     def test_repeated_failed_run_is_rejected_without_rerunning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -476,7 +764,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("[]", result.content)
             self.assertNotEqual(result.content, "Done.")
             self.assertIn("Completed and verified successfully.", result.content)
-            self.assertEqual(result.turns, 3)
+            self.assertEqual(result.turns, 4)
 
     def test_answer_is_rejected_after_progress_when_completion_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -524,7 +812,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("[]", result.content)
             self.assertNotIn("Please provide the existing code.", result.content)
             self.assertIn("Completed and verified successfully.", result.content)
-            self.assertEqual(result.turns, 3)
+            self.assertEqual(result.turns, 4)
 
     def test_failed_run_requires_repair_action_before_answering(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -572,10 +860,11 @@ class AgentTests(unittest.TestCase):
 
             result = agent.run("write a python file that outputs the nth fibonacci number given an input n. test it and display the results")
 
-            self.assertIn("IndexError", result.content)
+            self.assertNotIn("IndexError", result.content)
             self.assertIn("13", result.content)
             self.assertNotIn("Please provide an input value.", result.content)
             self.assertIn("$ python3 fibonacci.py 7", result.content)
+            self.assertEqual(result.content.count("$ python3"), 1)
             self.assertEqual(result.turns, 4)
 
     def test_input_script_can_be_verified_with_stdin(self):
@@ -834,7 +1123,7 @@ class AgentTests(unittest.TestCase):
                 ]
             )
 
-            result = agent.run("update project files for the Python hello example")
+            result = agent.run("write project files for the Python hello example")
 
             self.assertEqual(result.content, "Created hello.py.")
             self.assertEqual(Path(directory, "hello.py").read_text(encoding="utf-8"), 'print("hi")\n')
@@ -1279,6 +1568,58 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("old palindrome", result.content)
             self.assertEqual(agent.client.chat.call_count, 2)
 
+    def test_display_command_results_does_not_trigger_source_read_shortcut(self):
+        self.assertTrue(
+            _looks_like_edit_or_test_creation_request(
+                "run ordered_probe.py, change it, run it again, and display both command results"
+            )
+        )
+
+    def test_contract_blocks_answer_after_target_read_while_edit_is_missing(self):
+        contract = derive_task_contract(
+            task="change app.py",
+            intent="edit",
+            requires_run=False,
+            requires_tests=False,
+            requires_output=False,
+            target_path="app.py",
+            operation="update",
+        )
+        observations = [
+            {
+                "step": 1,
+                "action": {"action": "read_file", "path": "app.py"},
+                "result": {"ok": True, "path": "app.py", "content": "1: print('old')"},
+            }
+        ]
+
+        error = _validate_action_against_contract(
+            {"action": "answer", "message": "Done."},
+            contract,
+            observations,
+        )
+
+        self.assertIn("requires a workspace change", error)
+
+    def test_contract_authorizes_required_edit_in_mixed_shell_workflow(self):
+        contract = derive_task_contract(
+            task="run app.py, change it, and run it again",
+            intent="edit",
+            requires_run=True,
+            requires_tests=False,
+            requires_output=True,
+            target_path="app.py",
+            operation="update",
+        )
+
+        effective_intent = _tool_intent_for_action(
+            "shell",
+            {"action": "replace_in_file", "path": "app.py"},
+            contract,
+        )
+
+        self.assertEqual(effective_intent, "edit")
+
     def test_fix_display_request_does_not_use_read_shortcut(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "math_bug.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
@@ -1299,6 +1640,7 @@ class AgentTests(unittest.TestCase):
                             ),
                         }
                     },
+                    review_response(True, "The subtraction bug was replaced with addition."),
                     {
                         "message": {
                             "role": "assistant",
@@ -1312,7 +1654,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertIn("5", result.content)
             self.assertNotIn("return a - b", Path(directory, "math_bug.py").read_text(encoding="utf-8"))
-            self.assertEqual(agent.client.chat.call_count, 3)
+            self.assertEqual(agent.client.chat.call_count, 4)
 
     def test_action_context_includes_relevant_coding_skills(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1452,12 +1794,6 @@ class AgentTests(unittest.TestCase):
             agent.client.chat = Mock(
                 side_effect=[
                     route_response("edit"),
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": '{"action":"read_file","path":"app.py","start_line":1,"max_lines":200}',
-                        }
-                    },
                     {"message": {"role": "assistant", "content": '{"action":"finish","message":"Done."}'}},
                     {
                         "message": {
@@ -1465,6 +1801,7 @@ class AgentTests(unittest.TestCase):
                             "content": '{"action":"replace_in_file","path":"app.py","old":"old","new":"new","max_replacements":1}',
                         }
                     },
+                    review_response(True, "The requested update changed old to new."),
                 ]
             )
 
@@ -1472,7 +1809,8 @@ class AgentTests(unittest.TestCase):
 
             self.assertEqual(Path(directory, "app.py").read_text(encoding="utf-8"), "print('new')\n")
             self.assertNotEqual(result.content, "Done.")
-            self.assertIn("Updated `app.py`.", result.content)
+            self.assertIn("Completed all requested local steps.", result.content)
+            self.assertEqual(result.turns, 3)
 
     def test_model_contract_preserves_ordered_followup_on_previous_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1548,6 +1886,7 @@ class AgentTests(unittest.TestCase):
                             ),
                         }
                     },
+                    review_response(True, "The printout was changed to hello USA."),
                     {
                         "message": {
                             "role": "assistant",
@@ -1567,7 +1906,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Hello, world!", result.content)
             self.assertIn("hello USA", result.content)
             self.assertEqual(result.content.count("$ python3 hello_world.py"), 2)
-            self.assertEqual(result.turns, 4)
+            self.assertEqual(result.turns, 6)
 
     def test_model_contract_assistant_response_prevents_auto_finish(self):
         with tempfile.TemporaryDirectory() as directory:

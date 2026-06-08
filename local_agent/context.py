@@ -24,7 +24,7 @@ def prepare_messages(messages: list[dict[str, Any]], token_budget: int) -> list[
 
     omitted_count = max(0, len(messages) - 1 - len(recent))
     if omitted_count == 0:
-        return [head, *recent]
+        return _fit_messages_to_budget([head, *recent], token_budget)
 
     omitted = messages[1 : 1 + omitted_count]
     summary = _summarize_messages(omitted)
@@ -42,8 +42,25 @@ def prepare_messages(messages: list[dict[str, Any]], token_budget: int) -> list[
     while _estimate_messages(packed) > token_budget and len(summary_message["content"]) > 400:
         summary_message["content"] = _truncate(summary_message["content"], len(summary_message["content"]) // 2)
     if _estimate_messages(packed) > token_budget and recent:
-        return [head, recent[-1]]
-    return packed
+        return _fit_messages_to_budget([head, recent[-1]], token_budget)
+    return _fit_messages_to_budget(packed, token_budget)
+
+
+def _fit_messages_to_budget(messages: list[dict[str, Any]], token_budget: int) -> list[dict[str, Any]]:
+    fitted = [dict(message) for message in messages]
+    while _estimate_messages(fitted) > token_budget:
+        candidates = [
+            (index, len(str(message.get("content", ""))))
+            for index, message in enumerate(fitted)
+            if index > 0 and len(str(message.get("content", ""))) > 400
+        ]
+        if not candidates:
+            break
+        index, length = max(candidates, key=lambda item: item[1])
+        over_tokens = _estimate_messages(fitted) - token_budget
+        target_length = max(400, length - max(400, over_tokens * 4 + 64))
+        fitted[index]["content"] = _truncate_middle(str(fitted[index].get("content", "")), target_length)
+    return fitted
 
 
 def _summarize_messages(messages: list[dict[str, Any]]) -> str:
@@ -81,3 +98,13 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def _truncate_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n...[middle context omitted]...\n"
+    available = max(0, limit - len(marker))
+    head_length = int(available * 0.6)
+    tail_length = available - head_length
+    return f"{text[:head_length]}{marker}{text[-tail_length:] if tail_length else ''}"

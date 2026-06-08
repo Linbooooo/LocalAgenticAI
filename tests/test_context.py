@@ -20,6 +20,23 @@ class ContextTests(unittest.TestCase):
         messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}]
         self.assertEqual(prepare_messages(messages, token_budget=1000), messages)
 
+    def test_prepare_messages_bounds_single_oversized_protocol_context(self):
+        messages = [
+            {"role": "system", "content": "base rules"},
+            {
+                "role": "system",
+                "content": "protocol and user request\n" + ("middle context " * 2000) + "\nlatest evidence",
+            },
+        ]
+
+        packed = prepare_messages(messages, token_budget=1000)
+
+        self.assertEqual(len(packed), 2)
+        self.assertIn("protocol and user request", packed[1]["content"])
+        self.assertIn("latest evidence", packed[1]["content"])
+        self.assertIn("middle context omitted", packed[1]["content"])
+        self.assertLess(len(packed[1]["content"]), 4000)
+
 
 if __name__ == "__main__":
     unittest.main()

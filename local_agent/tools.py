@@ -54,6 +54,7 @@ class WorkspaceTools:
             "ok": True,
             "path": str(file_path.relative_to(self.config.workspace)),
             "content": "\n".join(numbered),
+            "raw_content": "\n".join(lines),
             "total_lines": len(lines),
         }
 

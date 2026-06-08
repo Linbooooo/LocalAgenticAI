@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +41,7 @@ class EvidenceLedger:
     successful_reads: tuple[dict[str, Any], ...] = ()
     successful_discovery: tuple[dict[str, Any], ...] = ()
     successful_runs: tuple[dict[str, Any], ...] = ()
+    successful_edit_reviews: tuple[dict[str, Any], ...] = ()
     latest_change_step: int = 0
 
     @property
@@ -71,9 +73,49 @@ def derive_task_contract(
                 id="workspace_change",
                 kind="workspace_change",
                 description="Complete the requested workspace file change.",
-                evidence=("successful write_file or replace_in_file action",),
-                params={"target_path": target_path, "operation": operation},
+                evidence=("successful write_file, replace_in_file, or edit_repair action",),
+                params={
+                    "target_path": target_path,
+                    "operation": operation,
+                    "edit_scope": _fallback_edit_scope(text),
+                },
             )
+        )
+
+    if intent == "edit" and operation in {"update", "repair"}:
+        obligations.append(
+            ContractObligation(
+                id="source_inspection",
+                kind="source_inspection",
+                description="Inspect the existing target source before changing it.",
+                evidence=("successful read_file action before the workspace change",),
+                params={"target_path": target_path},
+            )
+        )
+        obligations.append(
+            ContractObligation(
+                id="edit_review",
+                kind="edit_review",
+                description="Review the edited source against the user's requested transformation.",
+                evidence=("successful edit_review after the latest workspace change",),
+                params={"target_path": target_path},
+            )
+        )
+        constraints.extend(
+            [
+                ContractConstraint(
+                    kind="before",
+                    first="source_inspection",
+                    second="workspace_change",
+                    description="Inspect the existing source before changing it.",
+                ),
+                ContractConstraint(
+                    kind="before",
+                    first="workspace_change",
+                    second="edit_review",
+                    description="Review the resulting source after changing it.",
+                ),
+            ]
         )
 
     if intent == "edit" and _looks_like_delete_request(text):
@@ -125,7 +167,7 @@ def derive_task_contract(
                 kind="local_execution",
                 description="Run the requested local command or program successfully.",
                 evidence=("successful run_shell action",),
-                params={"min_successes": max(1, run_count)},
+                params={"min_successes": max(1, run_count), "target_path": target_path},
             )
         )
 
@@ -178,7 +220,11 @@ def contract_from_model_json(value: Any, *, fallback: TaskContract, task: str = 
     if not isinstance(value, dict):
         return fallback
 
-    obligations = _filter_model_obligations(_parse_model_obligations(value.get("obligations")), task)
+    obligations = _filter_model_obligations(
+        _parse_model_obligations(value.get("obligations")),
+        task,
+        fallback,
+    )
     constraints = _filter_constraints(
         _parse_model_constraints(value.get("constraints"), {obligation.id for obligation in obligations}),
         obligations,
@@ -199,6 +245,7 @@ def build_evidence_ledger(observations: list[dict[str, Any]]) -> EvidenceLedger:
     successful_reads: list[dict[str, Any]] = []
     successful_discovery: list[dict[str, Any]] = []
     successful_runs: list[dict[str, Any]] = []
+    successful_edit_reviews: list[dict[str, Any]] = []
     latest_change_step = 0
 
     for observation in observations:
@@ -208,7 +255,7 @@ def build_evidence_ledger(observations: list[dict[str, Any]]) -> EvidenceLedger:
         if not result.get("ok"):
             continue
         step = int(observation.get("step", 0))
-        if action_name in {"write_file", "replace_in_file"}:
+        if action_name in {"write_file", "replace_in_file", "edit_repair"}:
             successful_changes.append(observation)
             latest_change_step = max(latest_change_step, step)
         elif action_name == "delete_file":
@@ -220,6 +267,8 @@ def build_evidence_ledger(observations: list[dict[str, Any]]) -> EvidenceLedger:
             successful_discovery.append(observation)
         elif action_name == "run_shell" and _is_executed_shell_observation(observation):
             successful_runs.append(observation)
+        elif action_name == "edit_review":
+            successful_edit_reviews.append(observation)
 
     return EvidenceLedger(
         successful_changes=tuple(successful_changes),
@@ -227,6 +276,7 @@ def build_evidence_ledger(observations: list[dict[str, Any]]) -> EvidenceLedger:
         successful_reads=tuple(successful_reads),
         successful_discovery=tuple(successful_discovery),
         successful_runs=tuple(successful_runs),
+        successful_edit_reviews=tuple(successful_edit_reviews),
         latest_change_step=latest_change_step,
     )
 
@@ -256,8 +306,12 @@ def contract_missing(contract: TaskContract, observations: list[dict[str, Any]])
             missing.append("The requested workspace file has not been deleted.")
         elif not candidate_steps and obligation.kind == "workspace_discovery":
             missing.append("The workspace has not been inspected to discover the requested files or code.")
-        elif not candidate_steps and obligation.kind in {"source_inspection", "source_report"}:
+        elif not candidate_steps and obligation.kind == "source_inspection":
             missing.append("The requested source or file contents have not been read yet.")
+        elif not candidate_steps and obligation.kind == "source_report":
+            missing.append("The final requested source or file contents have not been read yet.")
+        elif not candidate_steps and obligation.kind == "edit_review":
+            missing.append("The edited source has not passed review against the requested transformation.")
         elif obligation.kind == "test_evidence":
             if not any(_has_passing_test_evidence(observation) for observation in _relevant_successful_runs(ledger)):
                 missing.append("Tests were requested, but no passing test evidence has been observed.")
@@ -314,16 +368,23 @@ def format_contract_evidence_for_final(contract: TaskContract, observations: lis
     if not contract.has_obligation("source_report"):
         return ""
 
+    ledger = build_evidence_ledger(observations)
     read_observations = [
         observation
-        for observation in observations
-        if observation.get("action", {}).get("action") == "read_file" and observation.get("result", {}).get("ok")
+        for observation in ledger.successful_reads
+        if not ledger.latest_change_step or int(observation.get("step", 0)) > ledger.latest_change_step
     ]
     if not read_observations:
         return ""
 
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    for observation in read_observations:
+        path = str(observation.get("result", {}).get("path", "file"))
+        latest_by_path[path] = observation
+
     lines = ["Observed file contents:"]
-    for observation in read_observations[:6]:
+    selected = list(latest_by_path.values())
+    for observation in selected[:6]:
         result = observation.get("result", {})
         path = result.get("path", "file")
         content = str(result.get("content", "")).strip()
@@ -334,8 +395,8 @@ def format_contract_evidence_for_final(contract: TaskContract, observations: lis
         lines.append("```text")
         lines.append(content)
         lines.append("```")
-    if len(read_observations) > 6:
-        lines.append(f"... {len(read_observations) - 6} additional read files omitted from the final response.")
+    if len(selected) > 6:
+        lines.append(f"... {len(selected) - 6} additional read files omitted from the final response.")
     return "\n".join(lines)
 
 
@@ -367,7 +428,14 @@ def _looks_like_discovery_request(text: str) -> bool:
 def _looks_like_source_display_request(text: str) -> bool:
     has_display_verb = bool(re.search(r"\b(display|show|read|open|view|include)\b", text))
     has_source_target = bool(re.search(r"\b(source|code|contents?|files?|scripts?)\b", text) or ".py" in text)
-    output_only = bool(re.search(r"\b(display|show|print)\s+(?:the\s+)?(?:output|results?)\b", text))
+    explicit_source_display = bool(
+        re.search(r"\b(display|show|read|open|view|include)\b.{0,50}\b(source|code|contents?|files?|scripts?)\b", text)
+    )
+    if explicit_source_display:
+        return True
+    output_only = bool(
+        re.search(r"\b(display|show|print)\b.{0,50}\b(?:command\s+)?(?:output|results?)\b", text)
+    )
     return has_display_verb and has_source_target and not output_only
 
 
@@ -397,7 +465,17 @@ def _requested_run_count(text: str) -> int:
     for word, count in word_counts.items():
         if re.search(rf"\b{word}\b", text):
             return count
-    return 0
+    verbs = re.findall(r"\b(?:run|execute|rerun)\b", text)
+    return len(verbs) if len(verbs) > 1 else 0
+
+
+def _fallback_edit_scope(text: str) -> str | None:
+    test_terms = r"(?:tests?|test cases?|examples?|fixtures?|demo(?: inputs?)?|assertions?)"
+    change_terms = r"(?:change|modify|update|replace|add|rewrite|make)"
+    if re.search(rf"\b{change_terms}\b.{{0,80}}\b{test_terms}\b", text):
+        if not re.search(r"\b(fix|debug|repair|refactor|implementation|algorithm|function|class|production code)\b", text):
+            return "tests_only"
+    return None
 
 
 def _has_kind(obligations: list[ContractObligation], kind: str) -> bool:
@@ -440,10 +518,39 @@ def _parse_model_obligations(value: Any) -> list[ContractObligation]:
     return obligations
 
 
-def _filter_model_obligations(obligations: list[ContractObligation], task: str) -> list[ContractObligation]:
-    if _looks_like_assistant_response_request(task):
-        return obligations
-    return [obligation for obligation in obligations if obligation.kind != "assistant_response"]
+def _filter_model_obligations(
+    obligations: list[ContractObligation],
+    task: str,
+    fallback: TaskContract,
+) -> list[ContractObligation]:
+    filtered: list[ContractObligation] = []
+    allowed_execution_count = _fallback_execution_count(fallback)
+    model_executions = [obligation for obligation in obligations if obligation.kind == "local_execution"]
+    retained_execution_ids = {
+        obligation.id
+        for obligation in model_executions[-allowed_execution_count:]
+    } if allowed_execution_count else set()
+    for obligation in obligations:
+        if obligation.kind == "assistant_response" and not _looks_like_assistant_response_request(task):
+            continue
+        if obligation.kind == "source_report" and not fallback.has_obligation("source_report"):
+            continue
+        if obligation.kind in {"local_execution", "test_evidence", "visible_output"} and not fallback.has_obligation(
+            obligation.kind
+        ):
+            continue
+        if obligation.kind == "local_execution" and obligation.id not in retained_execution_ids:
+            continue
+        filtered.append(obligation)
+    return filtered
+
+
+def _fallback_execution_count(contract: TaskContract) -> int:
+    return sum(
+        int(obligation.params.get("min_successes", 1) or 1)
+        for obligation in contract.obligations
+        if obligation.kind == "local_execution" and obligation.required
+    )
 
 
 def _parse_model_constraints(value: Any, obligation_ids: set[str]) -> list[ContractConstraint]:
@@ -473,12 +580,73 @@ def _parse_model_constraints(value: Any, obligation_ids: set[str]) -> list[Contr
 
 def _merge_contracts(primary: TaskContract, fallback: TaskContract) -> TaskContract:
     obligations = list(primary.obligations)
-    existing_kinds = {obligation.kind for obligation in obligations}
     for obligation in fallback.obligations:
-        if obligation.kind in existing_kinds:
+        if obligation.kind == "local_execution":
+            execution_indexes = [
+                index for index, existing in enumerate(obligations) if existing.kind == "local_execution"
+            ]
+            if execution_indexes:
+                required = int(obligation.params.get("min_successes", 1) or 1)
+                observed = sum(
+                    int(obligations[index].params.get("min_successes", 1) or 1)
+                    for index in execution_indexes
+                )
+                if observed < required:
+                    index = execution_indexes[-1]
+                    existing = obligations[index]
+                    obligations[index] = ContractObligation(
+                        id=existing.id,
+                        kind=existing.kind,
+                        description=existing.description,
+                        evidence=existing.evidence or obligation.evidence,
+                        required=existing.required,
+                        params={
+                            **obligation.params,
+                            **existing.params,
+                            "min_successes": int(existing.params.get("min_successes", 1) or 1)
+                            + (required - observed),
+                        },
+                    )
+                continue
+        matching_index = next(
+            (
+                index
+                for index, existing in enumerate(obligations)
+                if existing.kind == obligation.kind
+                and _normalized_path(existing.params.get("target_path"))
+                == _normalized_path(obligation.params.get("target_path"))
+            ),
+            None,
+        )
+        if matching_index is None and obligation.kind in {
+            "workspace_change",
+            "workspace_delete",
+            "workspace_discovery",
+            "source_inspection",
+            "source_report",
+            "edit_review",
+            "assistant_response",
+            "visible_output",
+            "test_evidence",
+        }:
+            same_kind = [
+                index for index, existing in enumerate(obligations) if existing.kind == obligation.kind
+            ]
+            if len(same_kind) == 1:
+                matching_index = same_kind[0]
+        if matching_index is not None:
+            existing = obligations[matching_index]
+            merged_params = {**obligation.params, **existing.params}
+            obligations[matching_index] = ContractObligation(
+                id=existing.id,
+                kind=existing.kind,
+                description=existing.description,
+                evidence=existing.evidence or obligation.evidence,
+                required=existing.required,
+                params=merged_params,
+            )
             continue
         obligations.append(obligation)
-        existing_kinds.add(obligation.kind)
 
     constraints = list(primary.constraints)
     existing_constraints = {(constraint.kind, constraint.first, constraint.second) for constraint in constraints}
@@ -517,6 +685,7 @@ def _filter_constraints(
         "workspace_discovery",
         "source_inspection",
         "source_report",
+        "edit_review",
         "local_execution",
     }
     filtered: list[ContractConstraint] = []
@@ -567,8 +736,23 @@ def _candidate_observations(obligation: ContractObligation, ledger: EvidenceLedg
         return tuple(_filter_path_observations(ledger.successful_deletes, target_path))
     if obligation.kind == "workspace_discovery":
         return ledger.successful_discovery
-    if obligation.kind in {"source_inspection", "source_report"}:
+    if obligation.kind == "source_inspection":
         return tuple(_filter_path_observations(ledger.successful_reads, target_path))
+    if obligation.kind == "source_report":
+        reads = tuple(_filter_path_observations(ledger.successful_reads, target_path))
+        if ledger.latest_change_step:
+            return tuple(
+                observation
+                for observation in reads
+                if int(observation.get("step", 0)) > ledger.latest_change_step
+            )
+        return reads
+    if obligation.kind == "edit_review":
+        return tuple(
+            observation
+            for observation in _filter_path_observations(ledger.successful_edit_reviews, target_path)
+            if int(observation.get("step", 0)) > ledger.latest_change_step
+        )
     if obligation.kind == "local_execution":
         command = str(obligation.params.get("command") or "").strip()
         observations = ledger.successful_runs
@@ -618,12 +802,25 @@ def _run_matches_command(observation: dict[str, Any], command: str) -> bool:
     return observed == expected
 
 
-def _normalized_command_paths(command: str) -> set[str]:
+def command_target_paths(command: str) -> set[str]:
     try:
-        tokens = re.findall(r"""[^\s'"]+""", command)
-    except re.error:
+        tokens = shlex.split(command)
+    except ValueError:
         tokens = command.split()
-    return {_normalized_path(token) for token in tokens if _normalized_path(token)}
+    paths = {_normalized_path(token) for token in tokens if _normalized_path(token)}
+    try:
+        start_dir = tokens[tokens.index("-s") + 1]
+        pattern = tokens[tokens.index("-p") + 1]
+    except (ValueError, IndexError):
+        return paths
+    discovered_path = _normalized_path(f"{start_dir.rstrip('/')}/{pattern.lstrip('/')}")
+    if discovered_path:
+        paths.add(discovered_path)
+    return paths
+
+
+def _normalized_command_paths(command: str) -> set[str]:
+    return command_target_paths(command)
 
 
 def _target_path_from_command(command: str) -> str | None:
@@ -640,6 +837,7 @@ def _allowed_obligation_kinds() -> set[str]:
         "workspace_discovery",
         "source_inspection",
         "source_report",
+        "edit_review",
         "local_execution",
         "test_evidence",
         "visible_output",
@@ -651,12 +849,16 @@ def _sanitize_params(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     params: dict[str, Any] = {}
-    for key in {"target_path", "command", "expected_text"}:
+    for key in {"target_path", "command", "expected_text", "edit_scope"}:
+        if key not in value:
+            continue
         item = value.get(key)
         if isinstance(item, str) and item.strip():
             params[key] = _truncate(_one_line(item), 500)
         elif item is None:
             params[key] = None
+    if params.get("edit_scope") not in {None, "tests_only", "implementation", "whole_file"}:
+        params.pop("edit_scope", None)
     min_successes = value.get("min_successes")
     if isinstance(min_successes, int):
         params["min_successes"] = max(1, min(min_successes, 100))
