@@ -9,4 +9,6 @@ build/
 *.egg-info/
 .env
 local-agent.json
-
+.swebench-work*/
+swebench_predictions*.jsonl
+*.local-agent.json

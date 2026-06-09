@@ -1,21 +1,12 @@
-.PHONY: test eval-agentic eval-smoke eval-medium eval-hard benchmark benchmark-gpu benchmark-cpu doctor install docker-build docker-doctor compose-up compose-gpu compose-cpu compose-pull-model compose-chat
+.PHONY: test benchmark-agent benchmark-model benchmark-gpu benchmark-cpu swebench doctor install docker-build docker-doctor compose-up compose-gpu compose-cpu compose-pull-model compose-chat
 
 test:
 	python3 -m unittest discover -s tests
 
-eval-smoke:
-	python3 scripts/evaluate_agent.py --suite smoke
+benchmark-agent:
+	python3 scripts/benchmark_agent.py
 
-eval-agentic:
-	python3 scripts/evaluate_agent.py --suite agentic --timeout 300
-
-eval-medium:
-	python3 scripts/evaluate_agent.py --suite medium --timeout 300
-
-eval-hard:
-	python3 scripts/evaluate_agent.py --suite hard --timeout 300
-
-benchmark:
+benchmark-model:
 	python3 scripts/benchmark_ollama.py --runs 5 --warmup 1
 
 benchmark-gpu:
@@ -23,6 +14,9 @@ benchmark-gpu:
 
 benchmark-cpu:
 	python3 scripts/benchmark_ollama.py --runs 5 --warmup 1 --expected-processor cpu --label cpu
+
+swebench:
+	python3 scripts/swebench.py --limit 1
 
 doctor:
 	python3 -m local_agent doctor

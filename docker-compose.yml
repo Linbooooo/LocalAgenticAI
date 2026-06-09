@@ -42,7 +42,6 @@ services:
       LOCAL_AGENT_WORKSPACE: /workspace
       LOCAL_AGENT_TRUST: ask
       LOCAL_AGENT_NUM_CTX: "4096"
-      LOCAL_AGENT_MAX_NUM_CTX: "4096"
     volumes:
       - .:/workspace
     depends_on:

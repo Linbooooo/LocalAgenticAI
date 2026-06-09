@@ -66,7 +66,6 @@ def doctor(config: AgentConfig) -> int:
     print(f"Model: {config.model}")
     print(f"Ollama URL: {config.ollama_url}")
     print(f"Context: {config.num_ctx}")
-    print(f"Context cap: {config.max_num_ctx}")
     print(f"Trust: {config.trust}")
     print()
 

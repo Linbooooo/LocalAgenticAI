@@ -1,39 +1,16 @@
-# Operations Guide
+# Operations
 
-This guide covers installation, startup, GPU verification, Docker deployment, and recovery after a reboot.
-
-## Choose One Ollama Deployment
-
-The agent always calls Ollama over local HTTP. Use either:
-
-1. A host/WSL Ollama process at `http://127.0.0.1:11434`.
-2. The repository Docker Compose Ollama service.
-
-Do not start both on the same host port. If port `11434` is already allocated, check which Ollama deployment is running before starting another.
-
-## Local WSL Or Linux Setup
-
-Install the Python CLI:
+## Local WSL Or Linux
 
 ```bash
 cd ~/LocalAgenticAI
 bash scripts/install_local.sh
 . .venv/bin/activate
-```
-
-Install and configure Ollama:
-
-```bash
 bash scripts/setup_ollama_linux.sh
-```
-
-Start Ollama in a dedicated terminal:
-
-```bash
 bash scripts/run_ollama_tuned.sh gpu
 ```
 
-In another terminal:
+Keep the Ollama terminal open. In a second terminal:
 
 ```bash
 cd ~/LocalAgenticAI
@@ -43,59 +20,23 @@ local-agent doctor
 local-agent chat
 ```
 
-The tuned server script enables local-only mode, a 4096-token server context, flash attention, an `q8_0` KV cache, one loaded model, and one parallel request by default.
-
-## Docker Compose Setup
-
-Requirements:
-
-- Docker Desktop or Docker Engine is running.
-- Docker Compose is available.
-- NVIDIA GPU support is configured if GPU inference is expected.
-
-Start GPU-backed Ollama and pull the model:
+## Docker
 
 ```bash
-cd ~/LocalAgenticAI
 cp .env.example .env
 make compose-gpu
 docker compose --profile setup run --rm model-pull
-```
-
-Start CPU-only Ollama instead:
-
-```bash
-make compose-cpu
-```
-
-Switching modes recreates the Ollama container but preserves the shared model volume.
-If the models already live in a differently named volume, set
-`OLLAMA_DATA_VOLUME` and `OLLAMA_DATA_VOLUME_EXTERNAL=true` in `.env` before running
-either target. See [Performance Benchmarks](performance.md) for the complete
-switching and measurement workflow.
-
-Check the containerized agent:
-
-```bash
 docker compose --profile agent run --rm agent doctor
-```
-
-Start chat:
-
-```bash
 docker compose --profile agent run --rm agent chat
 ```
 
-The host can also run the Python CLI against the Compose Ollama service because the service binds to `127.0.0.1:11434`.
+Use `make compose-cpu` to force CPU inference. Both modes preserve the named Ollama model volume.
 
-## Startup After Reboot
+## After A Reboot
 
-For Docker Desktop on Windows:
-
-1. Start Docker Desktop.
-2. Wait until the Linux engine is ready.
-3. Open the Ubuntu WSL terminal.
-4. Start and verify the stack:
+1. Start Docker Desktop or the native Ollama service.
+2. Start the selected Compose mode if using Docker.
+3. Verify and open chat:
 
 ```bash
 cd ~/LocalAgenticAI
@@ -104,121 +45,39 @@ python3 -m local_agent doctor
 python3 -m local_agent chat
 ```
 
-If `docker` is unavailable inside WSL, enable Docker Desktop integration for the Ubuntu distribution under Docker Desktop settings. As a temporary diagnostic, the Windows CLI is usually located at:
-
-```text
-/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe
-```
-
-For a native WSL/Linux Ollama installation:
-
-```bash
-cd ~/LocalAgenticAI
-bash scripts/run_ollama_tuned.sh gpu
-```
-
-Then open a second terminal and run:
-
-```bash
-cd ~/LocalAgenticAI
-python3 -m local_agent doctor
-python3 -m local_agent chat
-```
-
-## Health And GPU Checks
-
-Agent health:
+## Health Checks
 
 ```bash
 python3 -m local_agent doctor
-```
-
-Ollama API:
-
-```bash
-curl http://127.0.0.1:11434/api/version
-curl http://127.0.0.1:11434/api/ps
-```
-
-Native Ollama:
-
-```bash
-ollama list
-ollama ps
-```
-
-Docker Ollama:
-
-```bash
-docker compose exec ollama ollama list
+nvidia-smi
 docker compose exec ollama ollama ps
 ```
 
-GPU visibility:
-
-```bash
-nvidia-smi
-```
-
-`doctor` and `ollama ps` should report nonzero VRAM use when the model is GPU-backed. Use `python3 -m local_agent preload` to load and keep the configured model resident.
-
-For repeatable CPU/GPU latency and throughput measurements, see [Performance Benchmarks](performance.md).
-
-## Common Problems
-
-### Ollama is not reachable
-
-Verify the server:
-
-```bash
-curl http://127.0.0.1:11434/api/version
-```
-
-If it fails, start the selected Ollama deployment. Do not pull a model until the server is reachable.
-
-### `ollama: command not found`
-
-Either install Ollama with `scripts/setup_ollama_linux.sh` or use the Docker Compose deployment. A Docker container does not automatically install the `ollama` CLI into WSL.
-
-### `docker: command not found` in WSL
-
-Start Docker Desktop and enable WSL integration for Ubuntu. The repository can only use Compose from WSL when the Docker CLI and engine are exposed there.
-
-### Port `11434` is already allocated
-
-Check for an existing container or process:
-
-```bash
-docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-ss -ltnp | grep 11434
-```
-
-Reuse the healthy existing Ollama service or stop the unintended duplicate. Avoid running multiple Compose projects that publish the same host port.
-
-### Model is installed but not loaded
-
-Loading is demand-driven. Run:
+`doctor` reports visible CPU, RAM, GPU, Ollama, model installation, and current model residency. A model may be installed but absent from `ps` until the first request or:
 
 ```bash
 python3 -m local_agent preload
 ```
 
-or send the first chat request. The first inference may take longer while the model loads.
+## Common Problems
 
-### Inference is CPU-bound
+**Ollama unreachable:** start either native Ollama or Compose, not both on port `11434`.
 
-Check `python3 -m local_agent doctor`, `ollama ps`, and `nvidia-smi`. In Docker, confirm the Ollama container was created with GPU support and the NVIDIA runtime is available.
+**`ollama` command missing in WSL:** use the Compose service or run `scripts/setup_ollama_linux.sh`.
 
-## Data Persistence
+**Docker unavailable in WSL:** start Docker Desktop and enable Ubuntu WSL integration.
 
-The Compose deployment stores models in the named volume `local-agentic-ai-ollama-data` by default. Recreating the container does not delete that volume.
+**Model is slow:** check `ollama ps` and `nvidia-smi`; partial VRAM residency is reported as `mixed`.
 
-To reuse another existing volume:
+**Agent can access too much:** local execution inherits the current user's permissions. Run the agent in Docker or another sandbox for untrusted tasks.
 
-```bash
-OLLAMA_DATA_VOLUME=your_existing_volume \
-OLLAMA_DATA_VOLUME_EXTERNAL=true \
-docker compose up -d ollama
+## Persistence
+
+Compose stores models in `local-agentic-ai-ollama-data` by default. To reuse another volume, set:
+
+```text
+OLLAMA_DATA_VOLUME=your_existing_volume
+OLLAMA_DATA_VOLUME_EXTERNAL=true
 ```
 
-Do not remove the volume unless model deletion is intentional.
+in the ignored `.env` file before starting either CPU or GPU mode.

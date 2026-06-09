@@ -1,143 +1,109 @@
-# Evaluation Guide
+# Evaluation
 
-The project evaluates two different systems:
+The project uses three layers. Each answers a different question.
 
-1. The deterministic harness: routing validation, contracts, tools, safety, context packing, and finish gates.
-2. The live agent: the harness plus the configured local model and prompts.
-
-A green unit suite does not guarantee that every live coding prompt will pass. A live failure can expose model reasoning weakness, prompt weakness, or a missing harness capability.
-
-## Unit Tests
-
-Run:
-
-```bash
-python3 -m unittest discover -s tests
-```
-
-The unit suite covers:
-
-- configuration and local Ollama endpoint restrictions
-- context compaction and adaptive context retry behavior
-- route and JSON action validation
-- tool confirmation, workspace confinement, and shell policy
-- task-contract parsing, fallback merging, evidence ledgers, and ordering constraints
-- repeated action prevention and repair behavior
-- coding skill selection
-
-CI runs the unit suite and builds the Docker image on pushes and pull requests.
-
-## Live Suites
-
-The live evaluator creates a new temporary workspace for each prompt and runs the real configured Ollama model:
-
-```bash
-python3 scripts/evaluate_agent.py --suite agentic --timeout 300
-python3 scripts/evaluate_agent.py --suite smoke
-python3 scripts/evaluate_agent.py --suite medium --timeout 300
-python3 scripts/evaluate_agent.py --suite hard --timeout 300
-```
-
-Equivalent Make targets:
-
-```bash
-make eval-agentic
-make eval-smoke
-make eval-medium
-make eval-hard
-```
-
-Use `--json` for machine-readable results:
-
-```bash
-python3 scripts/evaluate_agent.py --suite agentic --timeout 300 --json
-```
-
-Run one prompt:
-
-```bash
-python3 scripts/evaluate_agent.py \
-  --prompt "write hello.py, run it, and display the output" \
-  --timeout 180
-```
-
-## Suite Purposes
-
-### `agentic`
-
-Tests orchestration and contract completion rather than algorithm difficulty:
-
-- execute a program multiple requested times
-- display source before running
-- create, run, then delete a file
-- create, run, update, rerun, then delete
-- combine local work with a conversational response
-
-These cases use structured checks against output and final workspace state.
-
-### `smoke`
-
-Tests common short coding workflows such as file creation, execution, simple algorithms, and visible results.
-
-### `medium`
-
-Tests multi-case algorithms and data structures with more edge cases and repair opportunities.
-
-### `hard`
-
-Tests more difficult algorithm generation and verification. Failures here are often model-sensitive and should be diagnosed before changing the harness.
-
-## Structured Assertions
-
-Agentic cases can check:
-
-- required or forbidden output text
-- case-insensitive alternatives
-- minimum and maximum output occurrence counts
-- files that must exist
-- files that must be absent
-
-This prevents a superficially plausible final message from passing when the requested side effects did not happen.
-
-## How To Diagnose A Failure
-
-Classify the failure before changing code:
-
-1. **Protocol failure**: invalid route, contract, or action JSON.
-2. **Harness failure**: unsafe action accepted, valid action rejected, premature finish, repeated loop, or missing evidence enforcement.
-3. **Tool/runtime failure**: incorrect command, import path, missing dependency, timeout, or environment problem.
-4. **Model reasoning failure**: incorrect implementation, brittle tests, wrong repair, or inability to choose the next useful action despite correct context.
-5. **Evaluator failure**: assertion does not represent the user request or accepts false success.
-
-Preserve the failed temporary workspace shown in the evaluator output while diagnosing it. Inspect generated files and compare the observation trace against the task contract.
-
-## Recommended Development Loop
-
-For changes to tools or validation:
+## 1. Harness Tests
 
 ```bash
 make test
-make eval-agentic
 ```
 
-For changes to prompts, skills, model settings, or repair behavior:
+The unit suite tests the deterministic code:
+
+- Bash-block extraction
+- linear observation flow
+- recovery after a failed command
+- stopping after declined approval
+- context packing
+- local endpoint validation
+- shell confirmation and safety policy
+- streamed Ollama metrics
+
+These tests use a fake model. They prove the harness works, not that the model writes correct code.
+
+## 2. Local Coding Benchmark
 
 ```bash
-make test
-make eval-agentic
-make eval-smoke
+make benchmark-agent
 ```
 
-Run medium and hard suites when the change is intended to improve coding quality rather than only orchestration.
+`scripts/benchmark_agent.py` gives the model four tasks:
 
-Track at least:
+- create and run a program
+- repair existing code
+- implement an algorithm
+- extend existing code without regression
 
-- pass rate by suite
-- average steps and latency
-- repeated or blocked actions
-- false success claims
-- command failures and repair rate
-- unnecessary tool calls
-- final workspace correctness
+The model is not shown the evaluator assertions. After the agent finishes, a separate hidden command imports and tests the resulting code. This avoids scoring the model's own tests or final claims.
 
-Do not hide a model-sensitive failure by weakening an evaluator assertion. Change the model, prompt/context, skill guidance, or harness only when the failure analysis supports it.
+Reported metrics:
+
+- pass rate
+- TFS: task start to first shell action
+- model TTFT
+- generation TPS
+- end-to-end task latency
+- turns and commands per task
+
+Run one case while debugging:
+
+```bash
+python3 scripts/benchmark_agent.py --case repair-existing-code --json
+```
+
+## 3. SWE-bench Lite
+
+[SWE-bench](https://github.com/SWE-bench/SWE-bench) evaluates patches against real GitHub issues and repository tests. SWE-bench Lite contains 300 tasks and is the selected external accuracy benchmark.
+
+Install its optional tooling:
+
+```bash
+python3 -m pip install datasets swebench
+```
+
+Generate one local-model prediction:
+
+```bash
+python3 scripts/swebench.py \
+  --instance-id sympy__sympy-20590 \
+  --limit 1
+```
+
+The script:
+
+1. loads the official dataset row
+2. clones the repository and checks out `base_commit`
+3. runs this local agent on the issue statement
+4. captures `git diff --binary`
+5. writes official prediction fields: `instance_id`, `model_name_or_path`, and `model_patch`
+6. saves the linear trajectory and latency metrics separately
+
+Score with the official Docker evaluator:
+
+```bash
+python3 scripts/swebench.py \
+  --instance-id sympy__sympy-20590 \
+  --limit 1 \
+  --evaluate
+```
+
+Inference remains local. Dataset download, repository cloning, and evaluator image setup require network access. The official evaluator can require substantial disk, memory, and build time; its Docker result, not patch generation alone, determines resolved-task accuracy.
+
+## Recorded SWE-bench Result
+
+| Date | Dataset | Instance | Patch | Official result |
+|---|---|---|---|---|
+| 2026-06-09 | SWE-bench Lite | `sympy__sympy-20590` | empty | 0/1 resolved; classified as an empty patch |
+
+The saved trajectory showed the model inspecting repository history but misunderstanding the issue and finishing without a code change. This is a model-accuracy result, not an evaluator or action-protocol error.
+
+## Interpreting Failures
+
+- Harness test failure: deterministic control or safety bug.
+- Hidden-test failure with a valid trajectory: model, prompt, or context quality problem.
+- No shell action: instruction-following/model capability problem.
+- Command/runtime failure followed by recovery: expected agent behavior.
+- SWE-bench patch generated but unresolved: valid benchmark attempt, incorrect solution.
+- Evaluator setup failure: infrastructure result, not model accuracy.
+
+Keep benchmark prompts and hidden verification stable when comparing models or architecture changes.

@@ -12,9 +12,11 @@ license = "MIT"
 authors = [{ name = "Local Agentic AI" }]
 dependencies = []
 
+[project.optional-dependencies]
+swebench = ["datasets", "swebench"]
+
 [project.scripts]
 local-agent = "local_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["local_agent*"]
-

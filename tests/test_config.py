@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -6,49 +8,31 @@ from local_agent.config import AgentConfig
 
 
 class ConfigTests(unittest.TestCase):
-    def test_config_requires_loopback_endpoint(self):
-        config = AgentConfig(ollama_url="http://example.com:11434", workspace=Path("."))
-        with self.assertRaisesRegex(ValueError, "loopback"):
+    def test_defaults_finalize(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = AgentConfig(workspace=Path(temp))
             config.finalize()
+            self.assertEqual(config.model, "qwen2.5-coder:14b")
+            self.assertEqual(config.context_budget_tokens(), 3072)
 
-    def test_config_accepts_localhost(self):
-        config = AgentConfig(ollama_url="http://localhost:11434", workspace=Path("."))
-        config.finalize()
-        self.assertTrue(config.workspace.exists())
-
-    def test_config_accepts_compose_ollama_host(self):
-        config = AgentConfig(ollama_url="http://ollama:11434", workspace=Path("."))
-        config.finalize()
-        self.assertTrue(config.workspace.exists())
-
-    def test_config_reads_environment_overrides(self):
-        with patch.dict(
-            "os.environ",
-            {
-                "LOCAL_AGENT_MODEL": "deepseek-coder-v2:16b",
+    def test_environment_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = {
+                "LOCAL_AGENT_WORKSPACE": temp,
                 "LOCAL_AGENT_NUM_CTX": "8192",
-                "LOCAL_AGENT_MAX_NUM_CTX": "8192",
-                "LOCAL_AGENT_ALLOW_NETWORK_TOOLS": "true",
-            },
-        ):
-            config = AgentConfig.load(None)
-        self.assertEqual(config.model, "deepseek-coder-v2:16b")
-        self.assertEqual(config.num_ctx, 8192)
-        self.assertTrue(config.allow_network_tools)
+                "LOCAL_AGENT_NUM_PREDICT": "2048",
+                "LOCAL_AGENT_SHELL_TIMEOUT": "30",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                config = AgentConfig.load(None)
+            config.finalize()
+            self.assertEqual(config.context_budget_tokens(), 6144)
+            self.assertEqual(config.shell_timeout, 30)
 
-    def test_config_caps_context(self):
-        config = AgentConfig(workspace=Path("."), num_ctx=16384, max_num_ctx=4096)
-        config.finalize()
-        self.assertEqual(config.num_ctx, 4096)
-
-    def test_config_validates_contract_mode(self):
-        config = AgentConfig(workspace=Path("."), contract_mode="fallback")
-        config.finalize()
-        self.assertEqual(config.contract_mode, "fallback")
-
-        bad = AgentConfig(workspace=Path("."), contract_mode="maybe")
-        with self.assertRaisesRegex(ValueError, "contract_mode"):
-            bad.finalize()
+    def test_rejects_remote_ollama(self) -> None:
+        config = AgentConfig(ollama_url="https://example.com")
+        with self.assertRaises(ValueError):
+            config.finalize()
 
 
 if __name__ == "__main__":

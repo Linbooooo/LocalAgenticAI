@@ -17,9 +17,7 @@ class AgentConfig:
     ollama_url: str = "http://127.0.0.1:11434"
     workspace: Path = Path(".")
     num_ctx: int = 4096
-    max_num_ctx: int = 4096
-    min_num_ctx: int = 2048
-    num_predict: int = 2048
+    num_predict: int = 1024
     temperature: float = 0.2
     top_p: float = 0.9
     repeat_penalty: float = 1.05
@@ -28,8 +26,8 @@ class AgentConfig:
     ollama_timeout: int = 300
     trust: str = "ask"
     allow_network_tools: bool = False
-    max_steps: int = 24
-    contract_mode: str = "model"
+    max_steps: int = 20
+    shell_timeout: int = 120
 
     @classmethod
     def load(cls, path: Path | None) -> "AgentConfig":
@@ -53,8 +51,6 @@ class AgentConfig:
             "OLLAMA_URL": ("ollama_url", str),
             "LOCAL_AGENT_WORKSPACE": ("workspace", Path),
             "LOCAL_AGENT_NUM_CTX": ("num_ctx", int),
-            "LOCAL_AGENT_MAX_NUM_CTX": ("max_num_ctx", int),
-            "LOCAL_AGENT_MIN_NUM_CTX": ("min_num_ctx", int),
             "LOCAL_AGENT_NUM_PREDICT": ("num_predict", int),
             "LOCAL_AGENT_TEMPERATURE": ("temperature", float),
             "LOCAL_AGENT_TOP_P": ("top_p", float),
@@ -64,7 +60,7 @@ class AgentConfig:
             "LOCAL_AGENT_OLLAMA_TIMEOUT": ("ollama_timeout", int),
             "LOCAL_AGENT_TRUST": ("trust", str),
             "LOCAL_AGENT_MAX_STEPS": ("max_steps", int),
-            "LOCAL_AGENT_CONTRACT_MODE": ("contract_mode", str),
+            "LOCAL_AGENT_SHELL_TIMEOUT": ("shell_timeout", int),
         }
         for env_name, (field_name, converter) in env_map.items():
             value = os.environ.get(env_name)
@@ -85,18 +81,14 @@ class AgentConfig:
             )
         if self.trust not in {"ask", "auto"}:
             raise ValueError("trust must be either 'ask' or 'auto'.")
-        if self.min_num_ctx < 512:
-            raise ValueError("min_num_ctx must be at least 512.")
-        if self.max_num_ctx < self.min_num_ctx:
-            raise ValueError("max_num_ctx must be greater than or equal to min_num_ctx.")
-        if self.num_ctx > self.max_num_ctx:
-            self.num_ctx = self.max_num_ctx
-        if self.num_ctx < self.min_num_ctx:
-            self.num_ctx = self.min_num_ctx
+        if self.num_ctx < 1024:
+            raise ValueError("num_ctx must be at least 1024.")
+        if self.num_predict < 1 or self.num_predict >= self.num_ctx:
+            raise ValueError("num_predict must be positive and smaller than num_ctx.")
         if self.max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
-        if self.contract_mode not in {"model", "fallback"}:
-            raise ValueError("contract_mode must be either 'model' or 'fallback'.")
+        if self.shell_timeout < 1:
+            raise ValueError("shell_timeout must be at least 1.")
         self.workspace = self.workspace.expanduser().resolve()
         if not self.workspace.exists():
             raise ValueError(f"Workspace does not exist: {self.workspace}")
@@ -112,4 +104,4 @@ class AgentConfig:
         }
 
     def context_budget_tokens(self) -> int:
-        return max(self.min_num_ctx, self.num_ctx - min(self.num_predict, self.num_ctx // 3))
+        return max(512, self.num_ctx - self.num_predict)
