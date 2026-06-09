@@ -13,10 +13,10 @@ LOCAL_OLLAMA_HOSTS = {"127.0.0.1", "localhost", "::1", "ollama", "host.docker.in
 
 @dataclass
 class AgentConfig:
-    model: str = "qwen2.5-coder:14b"
+    model: str = "qwen3.5:9b-q4_K_M"
     ollama_url: str = "http://127.0.0.1:11434"
     workspace: Path = Path(".")
-    num_ctx: int = 4096
+    num_ctx: int = 8192
     num_predict: int = 1024
     temperature: float = 0.2
     top_p: float = 0.9

@@ -5,7 +5,7 @@ services:
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
       OLLAMA_NO_CLOUD: "1"
-      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_CONTEXT_LENGTH: "${LOCAL_AGENT_NUM_CTX:-8192}"
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
       OLLAMA_KEEP_ALIVE: 30m
@@ -30,7 +30,7 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
-    command: ["pull", "${LOCAL_AGENT_MODEL:-qwen2.5-coder:14b}"]
+    command: ["pull", "${LOCAL_AGENT_MODEL:-qwen3.5:9b-q4_K_M}"]
 
   agent:
     build: .
@@ -38,10 +38,10 @@ services:
     profiles: ["agent"]
     environment:
       OLLAMA_URL: http://ollama:11434
-      LOCAL_AGENT_MODEL: ${LOCAL_AGENT_MODEL:-qwen2.5-coder:14b}
+      LOCAL_AGENT_MODEL: ${LOCAL_AGENT_MODEL:-qwen3.5:9b-q4_K_M}
       LOCAL_AGENT_WORKSPACE: /workspace
       LOCAL_AGENT_TRUST: ask
-      LOCAL_AGENT_NUM_CTX: "4096"
+      LOCAL_AGENT_NUM_CTX: "${LOCAL_AGENT_NUM_CTX:-8192}"
     volumes:
       - .:/workspace
     depends_on:

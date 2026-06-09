@@ -35,13 +35,16 @@ class OllamaClientTests(unittest.TestCase):
                 "eval_duration": 500_000_000,
             },
         ]
-        with patch("local_agent.ollama_client.urlopen", return_value=FakeResponse(events)):
+        with patch("local_agent.ollama_client.urlopen", return_value=FakeResponse(events)) as mocked_urlopen:
             response, metrics = OllamaClient("http://127.0.0.1:11434").chat_stream(
                 model="test",
                 messages=[{"role": "user", "content": "hi"}],
             )
 
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data)
         self.assertEqual(response["message"]["content"], "hello")
+        self.assertIs(payload["think"], False)
         self.assertEqual(metrics.total_ms, 2000)
         self.assertEqual(metrics.prompt_tps, 20)
         self.assertEqual(metrics.generation_tps, 20)

@@ -12,8 +12,8 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             config = AgentConfig(workspace=Path(temp))
             config.finalize()
-            self.assertEqual(config.model, "qwen2.5-coder:14b")
-            self.assertEqual(config.context_budget_tokens(), 3072)
+            self.assertEqual(config.model, "qwen3.5:9b-q4_K_M")
+            self.assertEqual(config.context_budget_tokens(), 7168)
 
     def test_environment_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

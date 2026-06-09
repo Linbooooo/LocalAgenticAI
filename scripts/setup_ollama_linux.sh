@@ -18,5 +18,4 @@ JSON
 echo "Configured Ollama local-only mode in ${HOME}/.ollama/server.json"
 echo "Next:"
 echo "  bash scripts/run_ollama_tuned.sh"
-echo "  ollama pull qwen2.5-coder:14b"
-
+echo "  ollama pull qwen3.5:9b-q4_K_M"

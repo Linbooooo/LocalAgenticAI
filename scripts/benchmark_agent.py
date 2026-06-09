@@ -101,7 +101,7 @@ PY""",
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a small hidden-test benchmark against the local coding agent.")
-    parser.add_argument("--model", default="qwen2.5-coder:14b")
+    parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
     parser.add_argument("--url", default="http://127.0.0.1:11434")
     parser.add_argument("--case", action="append", choices=[case.name for case in CASES])
     parser.add_argument("--limit", type=int, default=len(CASES))

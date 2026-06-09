@@ -2,6 +2,8 @@
 
 Speed and accuracy are measured separately.
 
+The current default is `qwen3.5:9b-q4_K_M` with an 8192-token context. Older rows remain as historical baselines for `qwen2.5-coder:14b`.
+
 ## Metrics
 
 - **TTFT:** milliseconds from request start to the first streamed model text.

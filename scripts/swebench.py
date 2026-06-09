@@ -23,7 +23,7 @@ def main() -> int:
     parser.add_argument("--split", default="test")
     parser.add_argument("--instance-id", action="append")
     parser.add_argument("--limit", type=int, default=1)
-    parser.add_argument("--model", default="qwen2.5-coder:14b")
+    parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
     parser.add_argument("--url", default="http://127.0.0.1:11434")
     parser.add_argument("--workdir", type=Path, default=Path(".swebench-work"))
     parser.add_argument("--output", type=Path, default=Path("swebench_predictions.jsonl"))

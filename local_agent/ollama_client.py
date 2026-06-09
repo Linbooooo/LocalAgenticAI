@@ -52,6 +52,7 @@ class OllamaClient:
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                "think": False,
                 "options": options or {},
                 "keep_alive": keep_alive,
             },
@@ -69,6 +70,7 @@ class OllamaClient:
             "model": model,
             "messages": messages,
             "stream": True,
+            "think": False,
             "options": options or {},
             "keep_alive": keep_alive,
         }

@@ -31,9 +31,11 @@ See [Architecture](docs/architecture.md), [Evaluation](docs/evaluation.md), [Per
 
 ## Model Choice
 
-The default is `qwen2.5-coder:14b`. It is a practical balance for this machine's RTX 3080 Ti with 12 GB VRAM and 16 GB system RAM: substantially more capable than small 7B coders, while remaining usable with partial GPU offload and a 4096-token context.
+The default is `qwen3.5:9b-q4_K_M`. Its 6.6 GB GGUF fits comfortably on this machine's RTX 3080 Ti with 12 GB VRAM, leaving room for an 8192-token context, while also fitting in 16 GB system RAM for CPU-only execution. Qwen3.5 improves instruction following, coding, and agent behavior over the older default while using less memory.
 
 The model is configurable. Larger models generally improve planning and code quality but require more memory and reduce throughput. Smaller models are faster but fail more often on multi-step repair.
+
+The harness disables Ollama's separate thinking stream so the model spends its bounded output budget on visible Bash actions and final answers.
 
 ## Quick Start
 
@@ -99,10 +101,10 @@ Both modes reuse the same model volume. The base Compose file disables CUDA; `do
 Common environment variables:
 
 ```text
-LOCAL_AGENT_MODEL=qwen2.5-coder:14b
+LOCAL_AGENT_MODEL=qwen3.5:9b-q4_K_M
 OLLAMA_URL=http://127.0.0.1:11434
 LOCAL_AGENT_WORKSPACE=.
-LOCAL_AGENT_NUM_CTX=4096
+LOCAL_AGENT_NUM_CTX=8192
 LOCAL_AGENT_NUM_PREDICT=1024
 LOCAL_AGENT_MAX_STEPS=20
 LOCAL_AGENT_SHELL_TIMEOUT=120

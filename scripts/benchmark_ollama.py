@@ -34,12 +34,12 @@ class RunMetrics:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark a local Ollama model with streaming TTFT and token metrics.")
     parser.add_argument("--url", default="http://127.0.0.1:11434", help="Local Ollama base URL.")
-    parser.add_argument("--model", default="qwen2.5-coder:14b", help="Ollama model name.")
+    parser.add_argument("--model", default="qwen3.5:9b-q4_K_M", help="Ollama model name.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Fixed prompt used for every measured run.")
     parser.add_argument("--runs", type=int, default=5, help="Number of measured runs.")
     parser.add_argument("--warmup", type=int, default=1, help="Warmup runs excluded from the summary.")
     parser.add_argument("--num-predict", type=int, default=128, help="Maximum generated tokens per run.")
-    parser.add_argument("--num-ctx", type=int, default=4096, help="Context window used for the benchmark.")
+    parser.add_argument("--num-ctx", type=int, default=8192, help="Context window used for the benchmark.")
     parser.add_argument("--timeout", type=int, default=600, help="Timeout per request in seconds.")
     parser.add_argument("--label", default="", help="Optional label such as gpu-baseline or cpu-baseline.")
     parser.add_argument("--expected-processor", choices=["cpu", "gpu", "mixed"], help="Fail if Ollama reports another mode.")
@@ -103,6 +103,7 @@ def benchmark_run(args: argparse.Namespace) -> RunMetrics:
         "model": args.model,
         "prompt": args.prompt,
         "stream": True,
+        "think": False,
         "keep_alive": "30m",
         "options": {
             "temperature": 0,
