@@ -91,11 +91,16 @@ Inference remains local. Dataset download, repository cloning, and evaluator ima
 
 ## Recorded SWE-bench Result
 
-| Date | Dataset | Instance | Patch | Official result |
-|---|---|---|---|---|
-| 2026-06-09 | SWE-bench Lite | `sympy__sympy-20590` | empty | 0/1 resolved; classified as an empty patch |
+| Date | Model | Dataset | Instance | Patch | Official result |
+|---|---|---|---|---|---|
+| 2026-06-09 | `qwen2.5-coder:14b` | SWE-bench Lite | `sympy__sympy-20590` | empty | 0/1 resolved; classified as an empty patch |
+| 2026-06-09 | `qwen3.5:9b-q4_K_M` | SWE-bench Lite | `sympy__sympy-20590` | empty | 0/1 resolved; classified as an empty patch |
 
-The saved trajectory showed the model inspecting repository history but misunderstanding the issue and finishing without a code change. This is a model-accuracy result, not an evaluator or action-protocol error.
+The Qwen3.5 trajectory preserved the base commit and completed 20 agent turns,
+but spent them inspecting the inheritance hierarchy. It never edited a file
+and ended by describing another inspection step instead of executing it. The
+official evaluator therefore received an empty patch. This is a model and
+long-horizon agent-accuracy result, not an evaluator or action-protocol error.
 
 ## Interpreting Failures
 
